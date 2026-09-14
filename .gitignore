@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+build/
+.swiftpm/
+
+# Xcode
+*.xcodeproj
+xcuserdata/
+DerivedData/
+
+# Editors
+.vscode/
+.idea/

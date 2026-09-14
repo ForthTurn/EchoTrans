@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>EchoTrans</string>
+	<key>CFBundleDisplayName</key>
+	<string>EchoTrans</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.yann.echotrans</string>
+	<key>CFBundleExecutable</key>
+	<string>EchoTrans</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>EchoTrans 需要「屏幕录制」权限来通过 ScreenCaptureKit 捕获系统输出的音频（仅采集声音，不录制画面）。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>EchoTrans 需要语音识别权限，把采集到的系统音频实时转写成文字。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>EchoTrans 需要麦克风权限（仅当使用麦克风输入模式时）。</string>
+</dict>
+</plist>
