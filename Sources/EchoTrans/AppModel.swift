@@ -4,6 +4,11 @@ import Foundation
 @MainActor
 final class AppModel: ObservableObject {
 
+    private struct AppError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
     enum Phase: Equatable {
         case idle        // 空闲
         case capturing   // 采集中
@@ -34,32 +39,30 @@ final class AppModel: ObservableObject {
     // 实时对照翻译（右列）：按句增量翻译已稳定的文本
     @Published private(set) var liveTranslation = ""
     private var liveTranslatedOffset = 0
+    private var liveTranslatedSource = ""
     private var liveTranslationTask: Task<Void, Never>?
+    private var liveTranslationDebounceTask: Task<Void, Never>?
     private var lastLiveTranslateAt = Date.distantPast
+    private var lastTranscriptUpdateAt = Date.distantPast
     private let liveTranslateInterval: TimeInterval = 2.0
+    private let liveTranslationDebounce: TimeInterval = 0.8
+    private let liveSoftBoundaryDelay: TimeInterval = 2.5
+    private let liveSoftBoundaryLength = 24
 
     let settings: AppSettings
     let modelManager: ModelManager
 
     private let engine = SystemAudioCaptureEngine()
-    private let transcriber = TranscriptionService()
     private let store: SessionStore
     private var consumeTask: Task<Void, Never>?
     private var session: SessionStore.Session?
     private var audioWriter: WavFileWriter?
-    private var waitingForFinal = false
     private var liveLocal: LocalLiveTranscriber?
-    private var applePreviewActive = false
 
     init(settings: AppSettings = AppSettings.load()) {
         self.settings = settings
         self.modelManager = ModelManager(settings: settings)
         self.store = SessionStore(rootDirectory: settings.outputDirectoryURL)
-        transcriber.onResult = { [weak self] text, isFinal in
-            Task { @MainActor [weak self] in
-                self?.handleTranscription(text: text, isFinal: isFinal)
-            }
-        }
     }
 
     // MARK: - 对外操作
@@ -80,12 +83,6 @@ final class AppModel: ObservableObject {
 
     private func startSession() async {
         do {
-            guard await TranscriptionService.requestAuthorization() else {
-                throw TranscriptionService.TranscriptionError(
-                    message: "未获得语音识别权限，请在「系统设置 → 隐私与安全性 → 语音识别」中授权"
-                )
-            }
-
             finalizedText = ""
             partialText = ""
             translationResults = []
@@ -94,9 +91,13 @@ final class AppModel: ObservableObject {
             audioLevel = 0
             liveTranslation = ""
             liveTranslatedOffset = 0
+            liveTranslatedSource = ""
             liveTranslationTask?.cancel()
             liveTranslationTask = nil
+            liveTranslationDebounceTask?.cancel()
+            liveTranslationDebounceTask = nil
             lastLiveTranslateAt = .distantPast
+            lastTranscriptUpdateAt = .distantPast
 
             // 每次开始采集 -> 新建一个会话目录（文字版落点）
             let newSession = try store.beginSession(startedAt: Date())
@@ -107,34 +108,31 @@ final class AppModel: ObservableObject {
 
             let buffers = try await engine.start()
 
-            // ── 实时预览引擎：本地引擎可用则直接本地实时，否则回退苹果 ASR ──
-            applePreviewActive = true
-            if settings.transcriptionEngine != .apple,
-               let local = LocalLiveTranscriber(engine: settings.transcriptionEngine, settings: settings) {
-                liveLocal = local
-                applePreviewActive = false
-                local.onUpdate = { [weak self] committed, partial in
-                    guard let self else { return }
-                    self.finalizedText = committed
-                    self.partialText = partial
-                    self.scheduleLiveTranslation()
-                }
-                local.onError = { [weak self] message in
-                    self?.statusMessage = "本地实时引擎出错：\(message)"
-                }
-                local.start()
-                statusMessage = "正在采集…（实时引擎：\(settings.transcriptionEngine.shortName) · 本地）"
-            } else {
-                if settings.transcriptionEngine != .apple {
-                    statusMessage = "本地模型不可用，实时预览回退苹果识别；停止后仍会用本地引擎出定稿"
-                } else {
-                    statusMessage = "正在采集…（实时引擎：苹果系统识别）"
-                }
-                try transcriber.start(localeIdentifier: settings.recognitionLocale)
+            // 实时预览只使用本地模型；模型不可用时明确失败，避免静默回退到低质量 Apple Speech。
+            guard settings.transcriptionEngine != .apple,
+                  let local = LocalLiveTranscriber(engine: settings.transcriptionEngine, settings: settings) else {
+                throw AppError(
+                    message: "本地 \(settings.transcriptionEngine.shortName) 模型不可用，请在设置中确认模型已安装"
+                )
             }
+            liveLocal = local
+            local.onUpdate = { [weak self] committed, partial in
+                guard let self else { return }
+                let changed = self.finalizedText != committed || self.partialText != partial
+                self.finalizedText = committed
+                self.partialText = partial
+                if changed {
+                    self.lastTranscriptUpdateAt = Date()
+                }
+                self.scheduleLiveTranslation()
+            }
+            local.onError = { [weak self] message in
+                self?.statusMessage = "本地实时引擎出错：\(message)"
+            }
+            local.start()
+            statusMessage = "正在采集…（实时引擎：\(settings.transcriptionEngine.shortName) · 本地）"
 
-            // detached：音频落盘与喂帧不占用主线程；writer/transcriber 提前在主线程捕获引用
-            let transcriber = self.transcriber
+            // detached：音频落盘与喂帧不占用主线程；writer/本地引擎提前捕获引用
             let writer = audioWriter
             let liveLocalEngine = liveLocal
             var totalFrames: Double = 0
@@ -143,7 +141,6 @@ final class AppModel: ObservableObject {
             var lastPublish = Date.distantPast
             consumeTask = Task.detached {
                 for await buffer in buffers {
-                    transcriber.append(buffer)
                     writer?.append(buffer: buffer)
                     liveLocalEngine?.append(buffer: buffer)
 
@@ -191,6 +188,12 @@ final class AppModel: ObservableObject {
     private func finishSession() async {
         statusMessage = "正在结束转写…"
 
+        // 停止后进入最终转写/翻译流程，不再让实时翻译请求修改右侧预览。
+        liveTranslationDebounceTask?.cancel()
+        liveTranslationDebounceTask = nil
+        liveTranslationTask?.cancel()
+        liveTranslationTask = nil
+
         consumeTask?.cancel()
         consumeTask = nil
 
@@ -208,16 +211,6 @@ final class AppModel: ObservableObject {
         }
 
         await engine.stop()
-        transcriber.endAudio()
-
-        // 等待苹果识别器吐出最终结果（最多 5 秒；仅当苹果预览在跑时）
-        if applePreviewActive {
-            waitingForFinal = true
-            let waitStart = Date()
-            while waitingForFinal, Date().timeIntervalSince(waitStart) < 5 {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-        }
 
         audioWriter?.finalize()
 
@@ -323,47 +316,83 @@ final class AppModel: ObservableObject {
         phase = .idle
     }
 
-    // MARK: - 转写结果处理
-
-    private func handleTranscription(text: String, isFinal: Bool) {
-        if isFinal {
-            appendFinalSegment(text)
-            partialText = ""
-            waitingForFinal = false
-        } else {
-            partialText = text
-        }
-        scheduleLiveTranslation()
-    }
-
     // MARK: - 实时对照翻译
 
     /// 实时译文列使用第一个目标语言；只翻译已完结的句子（节流 + 增量，避免重复翻译与频繁请求）
     private func scheduleLiveTranslation() {
         guard settings.needsTranslationAPI else { return }
+        // 识别器会在很短时间内连续修正同一句话，先合并这些更新，
+        // 避免每个 partial 都触发一次网络请求。
+        liveTranslationDebounceTask?.cancel()
+        let debounce = liveTranslationDebounce
+        liveTranslationDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(debounce * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.liveTranslationDebounceTask = nil
+                self.tryLiveTranslation()
+            }
+        }
+    }
+
+    /// 在 debounce 后真正尝试翻译；如果仍在节流窗口内，延迟到窗口结束再重试。
+    private func tryLiveTranslation() {
+        guard settings.needsTranslationAPI else { return }
         guard liveTranslationTask == nil else { return }
-        guard Date().timeIntervalSince(lastLiveTranslateAt) > liveTranslateInterval else { return }
+
+        let now = Date()
+        let wait = liveTranslateInterval - now.timeIntervalSince(lastLiveTranslateAt)
+        if wait > 0 {
+            liveTranslationDebounceTask?.cancel()
+            liveTranslationDebounceTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                await MainActor.run { [weak self] in
+                    self?.liveTranslationDebounceTask = nil
+                    self?.tryLiveTranslation()
+                }
+            }
+            return
+        }
 
         let full = fullTranscript
-        let (stable, _) = Self.splitStableTail(full)
+        let (stable, pending) = Self.splitStableTail(full)
 
-        // ASR 修正导致文本回退时重置，避免重复拼接
-        if stable.count < liveTranslatedOffset {
-            liveTranslatedOffset = 0
-            liveTranslation = ""
+        var source = stable
+        var consumedCount = stable.count
+
+        // 口语识别经常很久没有标点。尾巴达到一定长度且停止更新一段时间后，
+        // 把它当作软边界翻译，否则右列会长时间空白。
+        if source.count <= liveTranslatedOffset,
+           pending.count >= liveSoftBoundaryLength,
+           now.timeIntervalSince(lastTranscriptUpdateAt) >= liveSoftBoundaryDelay {
+            source = full
+            consumedCount = full.count
         }
-        guard stable.count >= liveTranslatedOffset + 6 else { return }
 
-        let chunk = String(stable.dropFirst(liveTranslatedOffset))
+        // 本地 ASR 会反复修正当前块。已经显示的译文保持不动，并把增量游标
+        // 重新锚定到最新原文；不要因为一次长度回退而把整列译文清空。
+        if liveTranslatedOffset > 0 && !source.hasPrefix(liveTranslatedSource) {
+            liveTranslatedSource = source
+            liveTranslatedOffset = source.count
+            return
+        }
+
+        guard consumedCount >= liveTranslatedOffset + 6 else { return }
+        let chunk = String(source.dropFirst(liveTranslatedOffset))
+        guard !chunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
         let config = settings.translationConfig
         let locale = settings.recognitionLocale
         let language = settings.targetLanguages.first ?? "English"
+        lastLiveTranslateAt = now
 
-        lastLiveTranslateAt = Date()
         liveTranslationTask = Task { [weak self] in
             do {
                 let service = TranslationService(config: config)
                 let translated = try await service.translate(text: chunk, to: language, sourceLocale: locale)
+                guard !Task.isCancelled else { return }
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     if self.liveTranslation.isEmpty {
@@ -371,12 +400,18 @@ final class AppModel: ObservableObject {
                     } else {
                         self.liveTranslation += "\n" + translated
                     }
-                    self.liveTranslatedOffset = stable.count
+                    self.liveTranslatedOffset = consumedCount
+                    self.liveTranslatedSource = source
                     self.liveTranslationTask = nil
-                    self.scheduleLiveTranslation()  // 处理积压的新句子
+                    self.tryLiveTranslation() // 处理请求期间积压的新句子
                 }
             } catch {
-                await MainActor.run { [weak self] in self?.liveTranslationTask = nil }
+                if Task.isCancelled { return }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.liveTranslationTask = nil
+                    self.statusMessage = "实时翻译失败：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -394,16 +429,6 @@ final class AppModel: ObservableObject {
             idx = text.index(before: idx)
         }
         return ("", text)
-    }
-
-    private func appendFinalSegment(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        if finalizedText.isEmpty {
-            finalizedText = trimmed
-        } else {
-            finalizedText += "\n\n" + trimmed
-        }
     }
 
     private var fullTranscript: String {

@@ -129,7 +129,9 @@ else
     if security find-identity -v -p codesigning 2>/dev/null | grep -q "EchoTrans Dev"; then
         SIGN_ID="EchoTrans Dev"
     else
-        SIGN_ID="-"
+        echo "错误：无法获得稳定的 EchoTrans Dev 签名身份。" >&2
+        echo "请运行 ./scripts/setup-dev-signing.sh，或设置 ECHOTRANS_SIGN_ID 使用正式签名。" >&2
+        exit 1
     fi
 fi
 

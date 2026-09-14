@@ -16,7 +16,7 @@ struct SettingsView: View {
             // ── 转写引擎 ──────────────────────────────────────────────
             Section {
                 Picker("引擎", selection: engineBinding) {
-                    ForEach(TranscriptionEngine.allCases) { engine in
+                    ForEach(TranscriptionEngine.selectableCases) { engine in
                         Text(engine.shortName).tag(engine)
                     }
                 }
@@ -33,6 +33,14 @@ struct SettingsView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+                if settings.transcriptionEngine == .senseVoice,
+                   Locale(identifier: settings.recognitionLocale).language.languageCode?.identifier == "ja" {
+                    Label("当前为日语：SenseVoice 可能出现中文音近字，准确率优先建议手动选择 Whisper。", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 LabeledContent("识别语言") {
                     Picker("", selection: $settings.recognitionLocale) {
                         ForEach(AppSettings.availableRecognitionLocales, id: \.code) { item in
@@ -43,7 +51,7 @@ struct SettingsView: View {
                     .frame(maxWidth: 300, alignment: .trailing)
                     .onChange(of: settings.recognitionLocale) { _, _ in settings.save() }
                 }
-                .help("苹果实时预览需与音频语言一致（不支持自动检测）；本地引擎在“自动检测”时由模型自行判断")
+                .help("选择具体语言可提高准确率；自动检测时由本地模型自行判断")
             } header: {
                 sectionHeader("转写引擎", systemImage: "waveform")
             }
@@ -65,7 +73,7 @@ struct SettingsView: View {
                 modelCard(
                     title: "SenseVoice Small (int8)",
                     size: "230MB",
-                    subtitle: "中日韩英 · 速度极快 · 自带标点",
+                    subtitle: "中文、英文低延迟场景 · 速度极快 · 日语准确率较差",
                     statusText: models.senseVoiceStatusText(),
                     progress: models.senseVoiceProgress(),
                     error: models.senseVoiceError,

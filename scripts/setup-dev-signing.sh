@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IDENTITY="EchoTrans Dev"
+P12_PASSWORD="EchoTransDevLocal"
 KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
@@ -36,18 +37,24 @@ extendedKeyUsage = critical, codeSigning
 EOF
 
 echo "==> 生成本地开发签名: ${IDENTITY}"
-# 使用传统 RSA PEM；macOS security 对新版 PKCS8/PKCS12 导入兼容性不好
+# 使用传统 RSA 密钥生成证书。最后通过 PKCS#12 一次性导入私钥和证书，
+# 避免 security import 分开导入时出现“参数无效”且无法形成 identity。
 openssl genrsa -traditional -out "${TMP}/dev.key" 2048 2>/dev/null
 openssl req -x509 -key "${TMP}/dev.key" \
     -out "${TMP}/dev.crt" \
     -days 3650 \
     -config "${TMP}/openssl.cnf" 2>/dev/null
 
+openssl pkcs12 -export \
+    -inkey "${TMP}/dev.key" \
+    -in "${TMP}/dev.crt" \
+    -name "${IDENTITY}" \
+    -passout "pass:${P12_PASSWORD}" \
+    -out "${TMP}/dev.p12" 2>/dev/null
+
 echo "==> 导入私钥和证书"
-security import "${TMP}/dev.key" \
-    -k "${KEYCHAIN}" -t priv -f openssl -A -T /usr/bin/codesign >/dev/null
-security import "${TMP}/dev.crt" \
-    -k "${KEYCHAIN}" -t cert -f pemseq -T /usr/bin/codesign >/dev/null
+security import "${TMP}/dev.p12" \
+    -k "${KEYCHAIN}" -f pkcs12 -P "${P12_PASSWORD}" -A -T /usr/bin/codesign >/dev/null
 
 # 让 security find-identity / codesign 认可该本地开发根证书
 security add-trusted-cert -d -r trustRoot \

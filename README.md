@@ -6,7 +6,7 @@
 
 - 🔊 **系统音频采集**：基于 ScreenCaptureKit 捕获系统正在播放的音频（自动排除本 App 自身的声音）
 - 📝 **双阶段转写**：
-  - 采集过程中：可选苹果 ASR，或 Whisper / SenseVoice 本地伪流式实时转写（模型常驻内存，约 4-10 秒句级延迟）
+  - 采集过程中：Whisper / SenseVoice 本地伪流式实时转写（模型常驻内存，约 4-10 秒句级延迟）
   - 停止采集后：可选 **Whisper / SenseVoice 本地引擎**对完整音频重新转写生成高质量最终文字版（完全离线，会议记录推荐）
 - 🌐 **多语言翻译**：自动调用 OpenAI 兼容接口（OpenAI / new-api / one-api / 自建网关均可），翻译成任意多种目标语言
 - 📁 **会话落盘**：手动开始/停止，每次开始采集新建一个会话目录，自动保存 `audio.wav` + `transcript.txt`（文字版）和各语言翻译文件
@@ -17,8 +17,7 @@
 | 引擎 | 模型 | 体积 | 特点 |
 | --- | --- | --- | --- |
 | Whisper (whisper.cpp) | large-v3-turbo | ~1.6GB | 综合准确率最高，中英日混合会议最佳，Metal GPU 加速 |
-| SenseVoice (sherpa-onnx) | small int8 | ~230MB | 中日韩英，速度极快（约 0.04x 实时率），自带标点 |
-| 苹果系统识别 | 系统内置 | 无 | 免下载，实时流式，准确率中等 |
+| SenseVoice (sherpa-onnx) | small int8 | ~230MB | 中文、英文低延迟场景，速度极快（约 0.04x 实时率），自带标点；日语效果较差 |
 
 模型可在 App 设置（⌘,）中一键下载（支持 HuggingFace 镜像），保存在 `~/Library/Application Support/EchoTrans/models`。
 
@@ -27,7 +26,7 @@
 ```
 SystemAudioCaptureEngine        ScreenCaptureKit（系统音频 → 16kHz 单声道 PCM）
         │
-        ├────────────► TranscriptionService      Apple Speech（实时预览）
+        ├────────────► LocalLiveTranscriber      Whisper / SenseVoice（实时预览）
         ├────────────► WavFileWriter             audio.wav 逐帧落盘
         ▼
 AppModel                        会话状态机（idle / capturing / finalizing）
@@ -46,9 +45,10 @@ SessionStore                    TranslationService
 | 权限 | 用途 |
 | --- | --- |
 | 屏幕录制 | ScreenCaptureKit 复用该权限来捕获系统音频（只采集声音，不录画面） |
-| 语音识别 | 实时预览转写（Apple Speech） |
 
 需要在「系统设置 → 隐私与安全性」中授权。
+
+本机反复重建时，必须保持同一个代码签名身份，否则 macOS 会把新构建当成新应用并再次要求屏幕录制授权。`make-app.sh` 默认使用固定的 `EchoTrans Dev` 开发签名；首次构建如果没有该身份，会自动运行 `scripts/setup-dev-signing.sh` 创建。不要在本机开发构建中使用 ad-hoc 签名（`-`）。
 
 ## 构建与运行
 
@@ -112,7 +112,6 @@ Sources/EchoTrans/
 ├── SettingsView.swift            # 设置界面（引擎 / 模型下载 / API）
 ├── AppModel.swift                # 会话状态机
 ├── Audio/SystemAudioCaptureEngine.swift   # ScreenCaptureKit 系统音频采集
-├── Speech/TranscriptionService.swift      # Apple Speech 实时预览
 ├── Transcription/LocalTranscriptionEngine.swift  # Whisper / SenseVoice 本地引擎
 ├── Transcription/ModelManager.swift       # 模型下载与解压
 ├── Translation/TranslationService.swift   # OpenAI 兼容翻译

@@ -1,13 +1,51 @@
 import Foundation
 import AVFoundation
 
+/// 清理伪流式 ASR 在块内或块边界产生的重复文本。
+enum TranscriptTextStitcher {
+    /// 只折叠相邻且完全相同的非空行，避免误删正常的重复表达。
+    static func collapseAdjacentDuplicateLines(_ text: String) -> String {
+        var result: [Substring] = []
+        var previous = ""
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let normalized = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty && normalized == previous {
+                continue
+            }
+            result.append(line)
+            previous = normalized
+        }
+        return result.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 如果新块开头与已提交文本结尾重叠，移除最长重叠部分。
+    static func continuation(after committed: String, newText: String) -> String {
+        let cleaned = collapseAdjacentDuplicateLines(newText)
+        guard !committed.isEmpty, !cleaned.isEmpty else { return cleaned }
+
+        let maxOverlap = min(200, committed.count, cleaned.count)
+        if maxOverlap >= 8 {
+            for length in stride(from: maxOverlap, through: 8, by: -1) {
+                if committed.suffix(length) == cleaned.prefix(length) {
+                    return String(cleaned.dropFirst(length))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+        }
+        return cleaned
+    }
+}
+
 /// 转写引擎
 enum TranscriptionEngine: String, Codable, CaseIterable, Identifiable {
-    case apple       // 苹果系统 ASR（实时流式）
+    case apple       // 仅用于读取旧设置；不再对用户提供
     case whisper     // whisper.cpp（本地，实时 + 最终稿）
     case senseVoice  // sherpa-onnx SenseVoice（本地，实时 + 最终稿）
 
     var id: String { rawValue }
+
+    /// Apple Speech 不适合长时间系统音频，产品只提供本地引擎。
+    static let selectableCases: [TranscriptionEngine] = [.whisper, .senseVoice]
 
     var displayName: String {
         switch self {
@@ -33,9 +71,9 @@ enum TranscriptionEngine: String, Codable, CaseIterable, Identifiable {
         case .apple:
             return "实时流式、开箱即用、零下载；长会议与专有名词准确率一般，需「语音识别」权限"
         case .whisper:
-            return "实时 + 停止后定稿均本地完成；中英日等混合会议综合准确率最高，Metal GPU 加速，句级延迟（约 4-10s）"
+            return "推荐准确率优先使用：中英日及混合会议综合效果最好，Metal GPU 加速，句级延迟约 4-10 秒"
         case .senseVoice:
-            return "实时 + 停止后定稿均本地完成；中日韩英速度极快、自带标点；英文输出为全大写风格，句级延迟（约 4-8s）"
+            return "推荐速度优先使用：中文、英文延迟低且自带标点；日语连续音频效果较差，可能出现中文音近字"
         }
     }
 }
@@ -124,14 +162,16 @@ final class LocalLiveTranscriber {
     private func tick() {
         guard chunk.count >= minTickSamples else { return }
         do {
-            let text = try transcribeCurrentChunk()
+            let text = TranscriptTextStitcher.collapseAdjacentDuplicateLines(try transcribeCurrentChunk())
+            let committedText = committed.joined(separator: "\n")
+            let continuation = TranscriptTextStitcher.continuation(after: committedText, newText: text)
             if chunk.count >= maxChunkSamples {
                 // 满块提交，开启下一块
-                if !text.isEmpty { committed.append(text) }
+                if !continuation.isEmpty { committed.append(continuation) }
                 chunk.removeAll(keepingCapacity: true)
                 partialText = ""
             } else {
-                partialText = text
+                partialText = continuation
             }
             publish()
         } catch {
@@ -178,7 +218,11 @@ final class LocalLiveTranscriber {
             if self.chunk.count >= self.minTickSamples,
                let text = try? self.transcribeCurrentChunk(),
                !text.isEmpty {
-                self.committed.append(text)
+                let base = self.committed.joined(separator: "\n")
+                let continuation = TranscriptTextStitcher.continuation(after: base, newText: text)
+                if !continuation.isEmpty {
+                    self.committed.append(continuation)
+                }
             }
             if let handle = self.handle {
                 switch self.engine {

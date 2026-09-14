@@ -36,7 +36,7 @@ final class AppSettings: ObservableObject {
     @Published var apiModel: String = ""
     @Published var outputDirectoryPath: String = SessionStore.defaultRootDirectory.path
 
-    /// 最终文字版采用的转写引擎（apple 实时；whisper/senseVoice 停止后本地重转写）
+    /// 实时预览和最终文字版采用的本地转写引擎。
     @Published var transcriptionEngine: TranscriptionEngine = .whisper
     @Published var whisperModelPath: String = AppSettings.defaultWhisperModelPath
     @Published var senseVoiceModelDir: String = AppSettings.defaultSenseVoiceModelDir
@@ -170,7 +170,9 @@ final class AppSettings: ObservableObject {
         settings.apiKey = payload.apiKey
         settings.apiModel = payload.apiModel == "gpt-4o-mini" ? "" : payload.apiModel
         settings.outputDirectoryPath = payload.outputDirectoryPath
-        settings.transcriptionEngine = TranscriptionEngine(rawValue: payload.transcriptionEngine) ?? .whisper
+        let storedEngine = TranscriptionEngine(rawValue: payload.transcriptionEngine) ?? .whisper
+        // Apple Speech 对长时间系统音频效果很差，旧配置自动迁移到 Whisper。
+        settings.transcriptionEngine = storedEngine == .apple ? .whisper : storedEngine
         settings.whisperModelPath = payload.whisperModelPath
         settings.senseVoiceModelDir = payload.senseVoiceModelDir
         settings.useHFMirror = payload.useHFMirror
