@@ -27,6 +27,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var translationResults: [TranslationResult] = []
     @Published private(set) var lastSessionDirectory: URL?
 
+    // 采集诊断：实时时长与电平（用于确认音频是否真的进来了）
+    @Published private(set) var capturedSeconds: Double = 0
+    @Published private(set) var audioLevel: Double = 0  // 0...1，RMS 映射
+
+    // 实时对照翻译（右列）：按句增量翻译已稳定的文本
+    @Published private(set) var liveTranslation = ""
+    private var liveTranslatedOffset = 0
+    private var liveTranslationTask: Task<Void, Never>?
+    private var lastLiveTranslateAt = Date.distantPast
+    private let liveTranslateInterval: TimeInterval = 2.0
+
     let settings: AppSettings
     let modelManager: ModelManager
 
@@ -77,6 +88,13 @@ final class AppModel: ObservableObject {
             partialText = ""
             translationResults = []
             lastSessionDirectory = nil
+            capturedSeconds = 0
+            audioLevel = 0
+            liveTranslation = ""
+            liveTranslatedOffset = 0
+            liveTranslationTask?.cancel()
+            liveTranslationTask = nil
+            lastLiveTranslateAt = .distantPast
 
             // 每次开始采集 -> 新建一个会话目录（文字版落点）
             let newSession = try store.beginSession(startedAt: Date())
@@ -91,10 +109,45 @@ final class AppModel: ObservableObject {
             // detached：音频落盘与喂帧不占用主线程；writer/transcriber 提前在主线程捕获引用
             let transcriber = self.transcriber
             let writer = audioWriter
+            var totalFrames: Double = 0
+            var windowSquared: Double = 0
+            var windowCount: Int = 0
+            var lastPublish = Date.distantPast
             consumeTask = Task.detached {
                 for await buffer in buffers {
                     transcriber.append(buffer)
                     writer?.append(buffer: buffer)
+
+                    // 采集统计（每 0.5s 发布一次，顺便做实时电平表）
+                    let frames = Double(buffer.frameLength)
+                    totalFrames += frames
+                    if let channel = buffer.floatChannelData {
+                        let pointer = channel[0]
+                        let n = Int(buffer.frameLength)
+                        var sum: Double = 0
+                        for i in 0..<n {
+                            let sample = Double(pointer[i])
+                            sum += sample * sample
+                        }
+                        windowSquared += sum
+                        windowCount += n
+                    }
+                    let now = Date()
+                    if now.timeIntervalSince(lastPublish) > 0.5 {
+                        let seconds = totalFrames / 16000.0
+                        let rms = windowCount > 0 ? sqrt(windowSquared / Double(windowCount)) : 0
+                        // RMS → dB → 0...1（-60dB…0dB）
+                        let db = rms > 0 ? 20 * log10(rms) : -160
+                        let level = max(0, min(1, (db + 60) / 60))
+                        windowSquared = 0
+                        windowCount = 0
+                        lastPublish = now
+                        let captured = seconds
+                        Task { @MainActor [weak self] in
+                            self?.capturedSeconds = captured
+                            self?.audioLevel = level
+                        }
+                    }
                 }
             }
 
@@ -128,6 +181,11 @@ final class AppModel: ObservableObject {
             phase = .idle
             statusMessage = "当前没有进行中的会话"
             return
+        }
+
+        // 诊断提示：音频几乎没进来，多半是屏幕录制权限或没在播放声音
+        if capturedSeconds < 1 {
+            statusMessage = "⚠️ 本次几乎未采集到音频（\(String(format: "%.1f", capturedSeconds))s）：请确认已授予「屏幕录制」权限，且采集期间有其他 App 在播放声音"
         }
 
         // ── 生成最终文字版 ──────────────────────────────
@@ -231,6 +289,67 @@ final class AppModel: ObservableObject {
         } else {
             partialText = text
         }
+        scheduleLiveTranslation()
+    }
+
+    // MARK: - 实时对照翻译
+
+    /// 实时译文列使用第一个目标语言；只翻译已完结的句子（节流 + 增量，避免重复翻译与频繁请求）
+    private func scheduleLiveTranslation() {
+        guard settings.needsTranslationAPI else { return }
+        guard liveTranslationTask == nil else { return }
+        guard Date().timeIntervalSince(lastLiveTranslateAt) > liveTranslateInterval else { return }
+
+        let full = fullTranscript
+        let (stable, _) = Self.splitStableTail(full)
+
+        // ASR 修正导致文本回退时重置，避免重复拼接
+        if stable.count < liveTranslatedOffset {
+            liveTranslatedOffset = 0
+            liveTranslation = ""
+        }
+        guard stable.count >= liveTranslatedOffset + 6 else { return }
+
+        let chunk = String(stable.dropFirst(liveTranslatedOffset))
+        let config = settings.translationConfig
+        let locale = settings.recognitionLocale
+        let language = settings.targetLanguages.first ?? "English"
+
+        lastLiveTranslateAt = Date()
+        liveTranslationTask = Task { [weak self] in
+            do {
+                let service = TranslationService(config: config)
+                let translated = try await service.translate(text: chunk, to: language, sourceLocale: locale)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    if self.liveTranslation.isEmpty {
+                        self.liveTranslation = translated
+                    } else {
+                        self.liveTranslation += "\n" + translated
+                    }
+                    self.liveTranslatedOffset = stable.count
+                    self.liveTranslationTask = nil
+                    self.scheduleLiveTranslation()  // 处理积压的新句子
+                }
+            } catch {
+                await MainActor.run { [weak self] in self?.liveTranslationTask = nil }
+            }
+        }
+    }
+
+    /// 把文本切成（已完结句部分, 未完结句尾巴）；已完结句可安全送翻
+    static func splitStableTail(_ text: String) -> (stable: String, pending: String) {
+        let terminators: Set<Character> = ["。", "！", "？", "!", "?", ".", "\n"]
+        guard !text.isEmpty else { return ("", "") }
+        var idx = text.index(before: text.endIndex)
+        while idx > text.startIndex {
+            if terminators.contains(text[idx]) {
+                let boundary = text.index(after: idx)
+                return (String(text[text.startIndex..<boundary]), String(text[boundary...]))
+            }
+            idx = text.index(before: idx)
+        }
+        return ("", text)
     }
 
     private func appendFinalSegment(_ text: String) {

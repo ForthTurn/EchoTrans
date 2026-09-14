@@ -26,13 +26,16 @@ final class TranscriptionService {
         }
     }
 
-    /// 开始一次转写会话。
+    /// 开始一次转写会话。localeIdentifier 为 "auto" 时（苹果 ASR 不支持自动检测）回退到系统语言。
     func start(localeIdentifier: String) throws {
         cancelTask()
 
-        let locale = Locale(identifier: localeIdentifier)
+        let effectiveIdentifier = localeIdentifier == "auto"
+            ? Locale.current.identifier
+            : localeIdentifier
+        let locale = Locale(identifier: effectiveIdentifier)
         guard let recognizer = SFSpeechRecognizer(locale: locale) else {
-            throw TranscriptionError(message: "不支持该识别语言：\(localeIdentifier)")
+            throw TranscriptionError(message: "不支持该识别语言：\(effectiveIdentifier)")
         }
         guard recognizer.isAvailable else {
             throw TranscriptionError(message: "语音识别服务当前不可用，请检查网络或稍后重试")

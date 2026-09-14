@@ -158,37 +158,80 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - 实时转写
+    // MARK: - 实时转写（原文/译文双列）
 
     private var transcriptCard: some View {
         GroupBox {
-            TextEditor(text: .constant(liveTranscript))
-                .font(.system(size: 13))
-                .disabled(true)
-                .scrollContentBackground(.hidden)
-                .background(Color(nsColor: .textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+            HStack(spacing: 12) {
+                liveColumn(
+                    title: "原文（实时识别）",
+                    text: liveTranscript,
+                    placeholder: "（开始采集后，这里会实时显示识别出的文字…）"
                 )
-                .frame(minHeight: 220)
-                .padding(6)
+                Divider()
+                liveColumn(
+                    title: "译文（\(liveTranslationLanguage)）",
+                    text: model.liveTranslation,
+                    placeholder: liveTranslationPlaceholder
+                )
+            }
+            .padding(6)
         } label: {
             HStack {
-                Label("实时转写", systemImage: "text.quote")
+                Label("实时对照", systemImage: "character.bubble")
                 Spacer()
-                Text("停止采集后自动保存 transcript.txt")
+                Text("停止采集后：本地引擎重转写 + 全部目标语言落盘")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
     }
 
+    private var liveTranslationLanguage: String {
+        settings.targetLanguages.first ?? "未选择"
+    }
+
+    private var liveTranslationPlaceholder: String {
+        if !settings.needsTranslationAPI {
+            return "（在设置中配置 API Key 后，这里会实时显示第一个目标语言的译文…）"
+        }
+        return "（识别出的完整句子会实时翻译到这里…）"
+    }
+
+    private func liveColumn(title: String, text: String, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(text.isEmpty ? placeholder : text)
+                        .font(.system(size: 13))
+                        .textSelection(.enabled)
+                        .foregroundStyle(text.isEmpty ? Color.secondary : Color.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .id("bottom")
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                )
+                .onChange(of: text) { _ in
+                    withAnimation {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                }
+            }
+        }
+        .frame(minHeight: 230, alignment: .topLeading)
+    }
+
     private var liveTranscript: String {
         var parts: [String] = []
         if !model.finalizedText.isEmpty { parts.append(model.finalizedText) }
         if !model.partialText.isEmpty { parts.append(model.partialText + " ▍") }
-        if parts.isEmpty { return "（开始采集后，这里会实时显示识别出的文字…）" }
         return parts.joined(separator: "\n\n")
     }
 
@@ -235,7 +278,18 @@ struct ContentView: View {
 
     private var footerBar: some View {
         HStack {
-            if let url = model.lastSessionDirectory {
+            if model.phase == .capturing {
+                levelMeter
+                Text("已采集 \(captureTimeText)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                if model.audioLevel < 0.02 {
+                    Text("⚠️ 电平过低：确认有 App 在播放声音")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } else if let url = model.lastSessionDirectory {
                 Button("打开会话目录") {
                     NSWorkspace.shared.open(url)
                 }
@@ -259,5 +313,23 @@ struct ContentView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    private var captureTimeText: String {
+        let seconds = Int(model.capturedSeconds)
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+
+    /// 简易电平表：5 段方块，实时反映系统音量 RMS
+    private var levelMeter: some View {
+        let bars = 5
+        let active = Int((model.audioLevel * Double(bars)).rounded(.up))
+        return HStack(spacing: 2) {
+            ForEach(0..<bars, id: \.self) { i in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(i < active ? Color.green : Color.secondary.opacity(0.25))
+                    .frame(width: 4, height: CGFloat(6 + i * 2))
+            }
+        }
     }
 }

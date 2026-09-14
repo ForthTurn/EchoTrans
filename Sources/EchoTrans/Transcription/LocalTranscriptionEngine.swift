@@ -36,14 +36,16 @@ enum LocalTranscriber {
         }
     }
 
-    /// 从识别语言 locale 推导 Whisper 语言代码（"zh-CN" -> "zh"）
+    /// 从识别语言 locale 推导 Whisper 语言代码（"zh-CN" -> "zh"；"auto" -> 自动检测）
     static func whisperLanguage(fromLocale locale: String) -> String {
+        if locale == "auto" { return "auto" }
         let code = Locale(identifier: locale).language.languageCode?.identifier ?? ""
         return code.isEmpty ? "auto" : code
     }
 
     /// SenseVoice 支持的语言（空串 = 自动检测）
     static func senseVoiceLanguage(fromLocale locale: String) -> String {
+        if locale == "auto" { return "" }
         let code = Locale(identifier: locale).language.languageCode?.identifier ?? ""
         return ["zh", "en", "ja", "ko", "yue"].contains(code) ? code : ""
     }

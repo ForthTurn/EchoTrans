@@ -65,7 +65,7 @@ struct SettingsView: View {
                 TextField("API Base URL（如 https://api.openai.com/v1）", text: $settings.apiBaseURL)
                 SecureField("API Key", text: $settings.apiKey)
                 TextField("模型（如 gpt-4o-mini）", text: $settings.apiModel)
-                Text("兼容 OpenAI / new-api / one-api 等任何实现了 /chat/completions 的服务。")
+                Text("兼容 OpenAI / new-api / one-api 等任何实现了 /chat/completions 的服务。实时译文列使用第一个目标语言。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -2,10 +2,12 @@ import Foundation
 import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
+import CoreGraphics
 
 /// 通过 ScreenCaptureKit 采集系统输出的音频（自动排除本 App 自身的声音）。
 ///
-/// 注意：系统会要求「屏幕录制」权限（ScreenCaptureKit 复用该权限来捕获系统音频）。
+/// 注意：系统会要求「屏幕录制」权限（ScreenCaptureKit 复用该权限来捕获系统音频），
+/// 且授权后必须**完全退出并重新打开 App** 才生效（macOS 的限制）。
 final class SystemAudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
 
     struct CaptureError: LocalizedError {
@@ -21,6 +23,12 @@ final class SystemAudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate
     func start() async throws -> AsyncStream<AVAudioPCMBuffer> {
         guard stream == nil else {
             throw CaptureError(message: "已经在采集会话中")
+        }
+
+        // 权限预检：未授权时先触发系统弹窗，并明确告知需授权后重启 App
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
+            throw CaptureError(message: "需要「屏幕录制」权限：请在弹窗中点「打开系统设置」开启 EchoTrans，然后完全退出（⌘Q）并重新打开 App 再试")
         }
 
         let buffers = AsyncStream<AVAudioPCMBuffer> { self.continuation = $0 }
@@ -67,15 +75,8 @@ final class SystemAudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, let continuation else { return }
+        // 注意：音频帧没有 SCStreamFrameInfo.status 附件（那是视频帧的校验），直接使用
         guard sampleBuffer.isValid else { return }
-
-        // 只保留完整帧
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let statusRawValue = attachments.first?[.status] as? Int,
-              let status = SCFrameStatus(rawValue: statusRawValue),
-              status == .complete else {
-            return
-        }
 
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
             return
