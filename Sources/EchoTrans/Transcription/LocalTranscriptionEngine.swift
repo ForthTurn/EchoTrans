@@ -112,9 +112,12 @@ final class LocalLiveTranscriber {
         guard let channel = buffer.floatChannelData else { return }
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return }
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.chunk.append(contentsOf: UnsafeBufferPointer(start: channel[0], count: frames))
+
+        // 关键：AVAudioPCMBuffer 的底层指针只在当前回调期间有效，
+        // 不能把 channel[0] 指针捕获到异步队列；先复制成值类型数组。
+        let samples = Array(UnsafeBufferPointer(start: channel[0], count: frames))
+        queue.async { [weak self, samples] in
+            self?.chunk.append(contentsOf: samples)
         }
     }
 
