@@ -117,10 +117,14 @@ else
     echo "==> 跳过内置模型（--no-models）"
 fi
 
-# ── 6. ad-hoc 签名 ────────────────────────────────────────────────
-echo "==> ad-hoc 签名"
-codesign --force -s - "$APP/Contents/Frameworks/"*.dylib
-codesign --force -s - "$APP"
+# ── 6. 签名 ─────────────────────────────────────────────────────────
+# 默认使用 ad-hoc 签名，保证本地构建不依赖钥匙串弹窗。
+# 正式分发时可通过 ECHOTRANS_SIGN_ID 指定 Developer ID：
+#   ECHOTRANS_SIGN_ID="Developer ID Application: ..." ./scripts/make-app.sh
+SIGN_ID="${ECHOTRANS_SIGN_ID:--}"
+echo "==> 签名（identity: ${SIGN_ID}）"
+codesign --force -s "${SIGN_ID}" "$APP/Contents/Frameworks/"*.dylib
+codesign --force -s "${SIGN_ID}" "$APP"
 
 echo
 APP_SIZE=$(du -sh "$APP" | cut -f1)

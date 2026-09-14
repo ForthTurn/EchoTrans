@@ -205,7 +205,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             ScrollViewReader { proxy in
                 ScrollView {
-                    Text(text.isEmpty ? placeholder : text)
+                    Text(text.isEmpty ? placeholder : Self.tailLimited(text))
                         .font(.system(size: 13))
                         .textSelection(.enabled)
                         .foregroundStyle(text.isEmpty ? Color.secondary : Color.primary)
@@ -213,19 +213,27 @@ struct ContentView: View {
                         .padding(8)
                         .id("bottom")
                 }
+                .frame(height: 320)
                 .background(Color(nsColor: .textBackgroundColor))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
                 )
-                .onChange(of: text) { _ in
-                    withAnimation {
-                        proxy.scrollTo("bottom", anchor: .bottom)
+                .onChange(of: text) { _, _ in
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
                     }
                 }
             }
         }
-        .frame(minHeight: 230, alignment: .topLeading)
+    }
+
+    /// 超长文本只渲染末尾部分，避免几小时会议后 UI 卡顿（自动滚动只看尾部）
+    static func tailLimited(_ text: String, limit: Int = 4000) -> String {
+        guard text.count > limit else { return text }
+        return "…（前文已省略）\n" + String(text.suffix(limit))
     }
 
     private var liveTranscript: String {

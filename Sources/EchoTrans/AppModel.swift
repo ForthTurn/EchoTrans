@@ -48,6 +48,8 @@ final class AppModel: ObservableObject {
     private var session: SessionStore.Session?
     private var audioWriter: WavFileWriter?
     private var waitingForFinal = false
+    private var liveLocal: LocalLiveTranscriber?
+    private var applePreviewActive = false
 
     init(settings: AppSettings = AppSettings.load()) {
         self.settings = settings
@@ -104,11 +106,37 @@ final class AppModel: ObservableObject {
             audioWriter = WavFileWriter(url: newSession.url.appendingPathComponent("audio.wav"))
 
             let buffers = try await engine.start()
-            try transcriber.start(localeIdentifier: settings.recognitionLocale)
+
+            // ── 实时预览引擎：本地引擎可用则直接本地实时，否则回退苹果 ASR ──
+            applePreviewActive = true
+            if settings.transcriptionEngine != .apple,
+               let local = LocalLiveTranscriber(engine: settings.transcriptionEngine, settings: settings) {
+                liveLocal = local
+                applePreviewActive = false
+                local.onUpdate = { [weak self] committed, partial in
+                    guard let self else { return }
+                    self.finalizedText = committed
+                    self.partialText = partial
+                    self.scheduleLiveTranslation()
+                }
+                local.onError = { [weak self] message in
+                    self?.statusMessage = "本地实时引擎出错：\(message)"
+                }
+                local.start()
+                statusMessage = "正在采集…（实时引擎：\(settings.transcriptionEngine.shortName) · 本地）"
+            } else {
+                if settings.transcriptionEngine != .apple {
+                    statusMessage = "本地模型不可用，实时预览回退苹果识别；停止后仍会用本地引擎出定稿"
+                } else {
+                    statusMessage = "正在采集…（实时引擎：苹果系统识别）"
+                }
+                try transcriber.start(localeIdentifier: settings.recognitionLocale)
+            }
 
             // detached：音频落盘与喂帧不占用主线程；writer/transcriber 提前在主线程捕获引用
             let transcriber = self.transcriber
             let writer = audioWriter
+            let liveLocalEngine = liveLocal
             var totalFrames: Double = 0
             var windowSquared: Double = 0
             var windowCount: Int = 0
@@ -117,6 +145,7 @@ final class AppModel: ObservableObject {
                 for await buffer in buffers {
                     transcriber.append(buffer)
                     writer?.append(buffer: buffer)
+                    liveLocalEngine?.append(buffer: buffer)
 
                     // 采集统计（每 0.5s 发布一次，顺便做实时电平表）
                     let frames = Double(buffer.frameLength)
@@ -161,13 +190,28 @@ final class AppModel: ObservableObject {
 
     private func finishSession() async {
         statusMessage = "正在结束转写…"
+
         consumeTask?.cancel()
         consumeTask = nil
+
+        // 停止本地实时引擎（提交剩余块 + 释放模型）
+        var localStopText: String?
+        if let local = liveLocal {
+            localStopText = await withCheckedContinuation { continuation in
+                local.stop { text in continuation.resume(returning: text) }
+            }
+            liveLocal = nil
+            if let localStopText, !localStopText.isEmpty {
+                finalizedText = localStopText
+                partialText = ""
+            }
+        }
+
         await engine.stop()
         transcriber.endAudio()
 
-        // 等待识别器吐出最终结果（最多 5 秒；选择了本地引擎时只需实时预览文本）
-        if settings.transcriptionEngine == .apple {
+        // 等待苹果识别器吐出最终结果（最多 5 秒；仅当苹果预览在跑时）
+        if applePreviewActive {
             waitingForFinal = true
             let waitStart = Date()
             while waitingForFinal, Date().timeIntervalSince(waitStart) < 5 {
