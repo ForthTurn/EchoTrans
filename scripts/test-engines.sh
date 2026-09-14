@@ -44,10 +44,10 @@ fi
 
 # ── 3. 编译 CLI ────────────────────────────────────────────────────
 echo "==> 编译 enginetest"
-cc -c Vendor/Bridge/EchoTransBridge.c -o build/test/bridge.o \
+cc -c Bridge/EchoTransBridge.c -o build/test/bridge.o \
     -I vendor/whisper.cpp/include -I vendor/whisper.cpp/ggml/include -I vendor/sherpa-onnx/include
 swiftc -swift-version 5 Tests/EngineCLITest/main.swift build/test/bridge.o -o build/test/enginetest \
-    -import-objc-header Vendor/Bridge/EchoTransBridge.h \
+    -import-objc-header Bridge/EchoTransBridge.h \
     -I vendor/whisper.cpp/include -I vendor/whisper.cpp/ggml/include -I vendor/sherpa-onnx/include \
     -L vendor/whisper-build/src -L vendor/whisper-build/ggml/src \
     -L vendor/whisper-build/ggml/src/ggml-metal -L vendor/whisper-build/ggml/src/ggml-blas \

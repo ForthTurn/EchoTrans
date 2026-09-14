@@ -109,7 +109,7 @@ Sources/EchoTrans/
 ├── Storage/SessionStore.swift             # 会话目录与文件落盘
 ├── Storage/WavFile.swift                  # WAV 增量写入 / 读取
 ├── Settings/AppSettings.swift             # 设置持久化
-Vendor/Bridge/
+Bridge/
 ├── EchoTransBridge.h/.c          # whisper.cpp + sherpa-onnx C 桥接
 scripts/
 ├── fetch-dependencies.sh         # 拉取 whisper.cpp 源码 + sherpa-onnx 库

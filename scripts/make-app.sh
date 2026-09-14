@@ -30,7 +30,7 @@ fi
 # ── 2. C 桥接层 ─────────────────────────────────────────────────────
 echo "==> 编译 C 桥接层"
 mkdir -p build/direct
-cc -c Vendor/Bridge/EchoTransBridge.c -o build/direct/bridge.o \
+cc -c Bridge/EchoTransBridge.c -o build/direct/bridge.o \
     -I vendor/whisper.cpp/include \
     -I vendor/whisper.cpp/ggml/include \
     -I vendor/sherpa-onnx/include
@@ -51,12 +51,12 @@ LINK_FLAGS=(
 )
 if [ "$CONFIG" = "debug" ]; then
     swiftc -swift-version 5 -parse-as-library -g $SOURCES build/direct/bridge.o \
-        -import-objc-header Vendor/Bridge/EchoTransBridge.h \
+        -import-objc-header Bridge/EchoTransBridge.h \
         -I vendor/whisper.cpp/include -I vendor/whisper.cpp/ggml/include -I vendor/sherpa-onnx/include \
         "${LINK_FLAGS[@]}" -o build/direct/EchoTrans
 else
     swiftc -swift-version 5 -parse-as-library -O $SOURCES build/direct/bridge.o \
-        -import-objc-header Vendor/Bridge/EchoTransBridge.h \
+        -import-objc-header Bridge/EchoTransBridge.h \
         -I vendor/whisper.cpp/include -I vendor/whisper.cpp/ggml/include -I vendor/sherpa-onnx/include \
         "${LINK_FLAGS[@]}" -o build/direct/EchoTrans
 fi
