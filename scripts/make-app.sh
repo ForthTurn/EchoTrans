@@ -118,10 +118,21 @@ else
 fi
 
 # ── 6. 签名 ─────────────────────────────────────────────────────────
-# 默认使用 ad-hoc 签名，保证本地构建不依赖钥匙串弹窗。
-# 正式分发时可通过 ECHOTRANS_SIGN_ID 指定 Developer ID：
-#   ECHOTRANS_SIGN_ID="Developer ID Application: ..." ./scripts/make-app.sh
-SIGN_ID="${ECHOTRANS_SIGN_ID:--}"
+# 本机开发默认使用固定自签名，避免每次重编译后 TCC 授权失效。
+# 正式分发时可通过 ECHOTRANS_SIGN_ID 指定 Developer ID。
+if [ -n "${ECHOTRANS_SIGN_ID:-}" ]; then
+    SIGN_ID="${ECHOTRANS_SIGN_ID}"
+else
+    if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "EchoTrans Dev"; then
+        ./scripts/setup-dev-signing.sh
+    fi
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "EchoTrans Dev"; then
+        SIGN_ID="EchoTrans Dev"
+    else
+        SIGN_ID="-"
+    fi
+fi
+
 echo "==> 签名（identity: ${SIGN_ID}）"
 codesign --force -s "${SIGN_ID}" "$APP/Contents/Frameworks/"*.dylib
 codesign --force -s "${SIGN_ID}" "$APP"

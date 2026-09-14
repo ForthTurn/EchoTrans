@@ -31,9 +31,9 @@ final class AppSettings: ObservableObject {
 
     @Published var recognitionLocale: String = "zh-CN"
     @Published var targetLanguages: [String] = ["English", "日本語"]
-    @Published var apiBaseURL: String = "https://api.openai.com/v1"
+    @Published var apiBaseURL: String = ""
     @Published var apiKey: String = ""
-    @Published var apiModel: String = "gpt-4o-mini"
+    @Published var apiModel: String = ""
     @Published var outputDirectoryPath: String = SessionStore.defaultRootDirectory.path
 
     /// 最终文字版采用的转写引擎（apple 实时；whisper/senseVoice 停止后本地重转写）
@@ -165,9 +165,10 @@ final class AppSettings: ObservableObject {
         }
         settings.recognitionLocale = payload.recognitionLocale
         settings.targetLanguages = payload.targetLanguages
-        settings.apiBaseURL = payload.apiBaseURL
+        // 兼容旧版本：如果用户从未修改过旧默认值，迁移为空白 placeholder
+        settings.apiBaseURL = payload.apiBaseURL == "https://api.openai.com/v1" ? "" : payload.apiBaseURL
         settings.apiKey = payload.apiKey
-        settings.apiModel = payload.apiModel
+        settings.apiModel = payload.apiModel == "gpt-4o-mini" ? "" : payload.apiModel
         settings.outputDirectoryPath = payload.outputDirectoryPath
         settings.transcriptionEngine = TranscriptionEngine(rawValue: payload.transcriptionEngine) ?? .whisper
         settings.whisperModelPath = payload.whisperModelPath

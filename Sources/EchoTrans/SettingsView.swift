@@ -87,15 +87,15 @@ struct SettingsView: View {
             // ── 翻译 API ─────────────────────────────────────────────
             Section {
                 LabeledContent("Base URL") {
-                    TextField("https://api.openai.com/v1", text: $settings.apiBaseURL)
+                    TextField("", text: $settings.apiBaseURL, prompt: Text("https://api.openai.com/v1"))
                         .textFieldStyle(.roundedBorder)
                 }
                 LabeledContent("API Key") {
-                    SecureField("sk-...", text: $settings.apiKey)
+                    SecureField("", text: $settings.apiKey, prompt: Text("sk-..."))
                         .textFieldStyle(.roundedBorder)
                 }
                 LabeledContent("模型") {
-                    TextField("gpt-4o-mini", text: $settings.apiModel)
+                    TextField("", text: $settings.apiModel, prompt: Text("gpt-4o-mini"))
                         .textFieldStyle(.roundedBorder)
                 }
             } header: {
