@@ -5,26 +5,38 @@
 ## 功能特性
 
 - 🔊 **系统音频采集**：基于 ScreenCaptureKit 捕获系统正在播放的音频（自动排除本 App 自身的声音）
-- 📝 **实时转写**：基于 Apple Speech 框架流式识别，支持中文、英文、日文、韩文等多种识别语言
-- 🌐 **多语言翻译**：会话结束后自动调用 OpenAI 兼容接口（OpenAI / new-api / one-api / 自建网关均可），翻译成任意多种目标语言
-- 📁 **会话落盘**：手动开始/停止，每次开始采集新建一个会话目录，自动保存 `transcript.txt`（文字版）和各语言翻译文件
-- 🖥 **原生界面**：SwiftUI 编写，设置（⌘,）可配置 API、识别语言、目标语言与输出目录
+- 📝 **双阶段转写**：
+  - 采集过程中：苹果系统识别**实时预览**（低延迟）
+  - 停止采集后：可选 **Whisper / SenseVoice 本地引擎**对音频重新转写生成高质量最终文字版（完全离线，会议记录推荐）
+- 🌐 **多语言翻译**：自动调用 OpenAI 兼容接口（OpenAI / new-api / one-api / 自建网关均可），翻译成任意多种目标语言
+- 📁 **会话落盘**：手动开始/停止，每次开始采集新建一个会话目录，自动保存 `audio.wav` + `transcript.txt`（文字版）和各语言翻译文件
+- 🖥 **原生界面**：SwiftUI 编写，设置（⌘,）可配置引擎、模型、API、语言与输出目录
+
+## 本地转写引擎
+
+| 引擎 | 模型 | 体积 | 特点 |
+| --- | --- | --- | --- |
+| Whisper (whisper.cpp) | large-v3-turbo | ~1.6GB | 综合准确率最高，中英日混合会议最佳，Metal GPU 加速 |
+| SenseVoice (sherpa-onnx) | small int8 | ~230MB | 中日韩英，速度极快（约 0.04x 实时率），自带标点 |
+| 苹果系统识别 | 系统内置 | 无 | 免下载，实时流式，准确率中等 |
+
+模型可在 App 设置（⌘,）中一键下载（支持 HuggingFace 镜像），保存在 `~/Library/Application Support/EchoTrans/models`。
 
 ## 架构
 
 ```
-SystemAudioCaptureEngine        ScreenCaptureKit（系统音频 → AVAudioPCMBuffer）
+SystemAudioCaptureEngine        ScreenCaptureKit（系统音频 → 16kHz 单声道 PCM）
         │
-        ▼
-TranscriptionService            Apple Speech（音频帧 → 实时文本）
-        │
+        ├────────────► TranscriptionService      Apple Speech（实时预览）
+        ├────────────► WavFileWriter             audio.wav 逐帧落盘
         ▼
 AppModel                        会话状态机（idle / capturing / finalizing）
+        │ 停止后
+        ├────────────► LocalTranscriber          whisper.cpp / sherpa-onnx（C 桥接，重转写最终稿）
         │                                  │
-        │ 开始时                            │ 停止后
         ▼                                  ▼
 SessionStore                    TranslationService
-（会话目录 / transcript.txt）    （OpenAI 兼容 /chat/completions → translations/*.md）
+（transcript.txt + audio.wav）   （OpenAI 兼容 /chat/completions → translations/*.md）
 ```
 
 ## 权限说明
@@ -34,40 +46,48 @@ SessionStore                    TranslationService
 | 权限 | 用途 |
 | --- | --- |
 | 屏幕录制 | ScreenCaptureKit 复用该权限来捕获系统音频（只采集声音，不录画面） |
-| 语音识别 | 把采集到的音频实时转写成文字 |
+| 语音识别 | 实时预览转写（Apple Speech） |
 
 需要在「系统设置 → 隐私与安全性」中授权。
 
 ## 构建与运行
 
-要求：macOS 13+、Swift 5.9+（Xcode 15+ 或 CommandLineTools）
+要求：macOS 13+、Xcode 15+ / CommandLineTools（cmake、git）
 
 ```bash
-# 方式一（推荐）：脚本打包成独立 App（swiftc 直编，不依赖 SwiftPM）
+# 1. 拉取依赖（whisper.cpp 源码 + sherpa-onnx 预编译库）
+./scripts/fetch-dependencies.sh
+
+# 2. 打包成独立 App（自动编译 whisper.cpp + 桥接层 + 主程序）
 ./scripts/make-app.sh
 open build/EchoTrans.app
 
-# 方式二：标准 SwiftPM（需要完整版 Xcode）
-# 注：部分版本的 CommandLineTools 存在 SwiftPM ManifestAPI 损坏的已知问题，
-#     会报 "Undefined symbols ... Package.__allocating_init" 错误，
-#     此时请使用方式一，或安装完整版 Xcode 后再 swift run。
-swift run
+# 可选：在 App 设置里下载模型；或用命令行：
+./scripts/fetch-dependencies.sh --models
+
+# 可选：引擎冒烟测试（不启动 GUI，验证 Whisper / SenseVoice 桥接）
+./scripts/test-engines.sh
 ```
 
-> 首次运行请使用打包后的 App，权限弹窗（屏幕录制 / 语音识别）才能正常触发。
+> 注：部分版本的 CommandLineTools 存在 SwiftPM ManifestAPI 损坏的已知问题，
+> `swift build` 会报 "Undefined symbols ... Package.__allocating_init"；
+> 本项目构建脚本不依赖 SwiftPM，始终可用。装完整版 Xcode 后也可用 Xcode 打开 Package.swift 开发。
 
-首次使用：按 `⌘,` 打开设置，配置：
+首次使用：按 `⌘,` 打开设置：
 
-1. **识别语言**（默认 zh-CN）
-2. **API Base URL / API Key / 模型**（任意 OpenAI 兼容服务；不配置则只转写不翻译）
-3. **输出目录**（默认 `~/Documents/EchoTrans`）
+1. **转写引擎**：默认 Whisper；会议记录推荐 Whisper（最稳）或 SenseVoice（中文最快）
+2. **下载对应模型**（设置里有进度条）
+3. **识别语言**（默认 zh-CN）
+4. **API Base URL / API Key / 模型**（任意 OpenAI 兼容服务；不配置则只转写不翻译）
+5. **输出目录**（默认 `~/Documents/EchoTrans`）
 
 ## 输出示例
 
 ```
 ~/Documents/EchoTrans/
 └── 2025-06-01 14-30-00/          # 每次开始采集 → 一个新会话目录
-    ├── transcript.txt            # 原始转写文字版
+    ├── audio.wav                 # 原始采集音频（16kHz，供本地引擎重新转写）
+    ├── transcript.txt            # 最终转写文字版（所选引擎生成）
     └── translations/
         ├── English.md
         └── 日本語.md
@@ -79,20 +99,30 @@ swift run
 Sources/EchoTrans/
 ├── EchoTransApp.swift            # App 入口
 ├── ContentView.swift             # 主界面
-├── SettingsView.swift            # 设置界面
+├── SettingsView.swift            # 设置界面（引擎 / 模型下载 / API）
 ├── AppModel.swift                # 会话状态机
 ├── Audio/SystemAudioCaptureEngine.swift   # ScreenCaptureKit 系统音频采集
-├── Speech/TranscriptionService.swift      # Speech 框架实时转写
+├── Speech/TranscriptionService.swift      # Apple Speech 实时预览
+├── Transcription/LocalTranscriptionEngine.swift  # Whisper / SenseVoice 本地引擎
+├── Transcription/ModelManager.swift       # 模型下载与解压
 ├── Translation/TranslationService.swift   # OpenAI 兼容翻译
 ├── Storage/SessionStore.swift             # 会话目录与文件落盘
-└── Settings/AppSettings.swift             # 设置持久化
+├── Storage/WavFile.swift                  # WAV 增量写入 / 读取
+├── Settings/AppSettings.swift             # 设置持久化
+Vendor/Bridge/
+├── EchoTransBridge.h/.c          # whisper.cpp + sherpa-onnx C 桥接
+scripts/
+├── fetch-dependencies.sh         # 拉取 whisper.cpp 源码 + sherpa-onnx 库
+├── make-app.sh                   # 编译打包 App
+└── test-engines.sh               # 引擎 CLI 冒烟测试
 ```
 
 ## 路线图
 
-- [ ] 句级实时 final 结果（当前为整段识别，结束时一次性落定）
+- [ ] 句级实时 final 结果与本地引擎实时分块转写（当前本地引擎在停止后一次性转写）
+- [ ] VAD 语音活动检测（减少 SenseVoice 分块切词）
 - [ ] 麦克风输入模式
-- [ ] 历史会话列表与回看
+- [ ] 历史会话列表与回看 / 重新转写
 - [ ] 导出 SRT 字幕
 - [ ] 多翻译引擎（DeepL / Google / 本地模型）
 - [ ] 菜单栏常驻 / 全局快捷键

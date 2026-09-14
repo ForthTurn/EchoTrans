@@ -28,16 +28,19 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastSessionDirectory: URL?
 
     let settings: AppSettings
+    let modelManager: ModelManager
 
     private let engine = SystemAudioCaptureEngine()
     private let transcriber = TranscriptionService()
     private let store: SessionStore
     private var consumeTask: Task<Void, Never>?
     private var session: SessionStore.Session?
+    private var audioWriter: WavFileWriter?
     private var waitingForFinal = false
 
     init(settings: AppSettings = AppSettings.load()) {
         self.settings = settings
+        self.modelManager = ModelManager(settings: settings)
         self.store = SessionStore(rootDirectory: settings.outputDirectoryURL)
         transcriber.onResult = { [weak self] text, isFinal in
             Task { @MainActor [weak self] in
@@ -79,13 +82,19 @@ final class AppModel: ObservableObject {
             let newSession = try store.beginSession(startedAt: Date())
             session = newSession
 
+            // 采集音频同步落盘为 audio.wav，供本地引擎在结束时重新转写
+            audioWriter = WavFileWriter(url: newSession.url.appendingPathComponent("audio.wav"))
+
             let buffers = try await engine.start()
             try transcriber.start(localeIdentifier: settings.recognitionLocale)
 
-            consumeTask = Task { [weak self] in
+            // detached：音频落盘与喂帧不占用主线程；writer/transcriber 提前在主线程捕获引用
+            let transcriber = self.transcriber
+            let writer = audioWriter
+            consumeTask = Task.detached {
                 for await buffer in buffers {
-                    guard let self else { break }
-                    self.transcriber.append(buffer)
+                    transcriber.append(buffer)
+                    writer?.append(buffer: buffer)
                 }
             }
 
@@ -104,12 +113,16 @@ final class AppModel: ObservableObject {
         await engine.stop()
         transcriber.endAudio()
 
-        // 等待识别器吐出最终结果（最多 5 秒）
-        waitingForFinal = true
-        let waitStart = Date()
-        while waitingForFinal, Date().timeIntervalSince(waitStart) < 5 {
-            try? await Task.sleep(nanoseconds: 200_000_000)
+        // 等待识别器吐出最终结果（最多 5 秒；选择了本地引擎时只需实时预览文本）
+        if settings.transcriptionEngine == .apple {
+            waitingForFinal = true
+            let waitStart = Date()
+            while waitingForFinal, Date().timeIntervalSince(waitStart) < 5 {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
         }
+
+        audioWriter?.finalize()
 
         guard let session else {
             phase = .idle
@@ -117,7 +130,55 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let transcript = fullTranscript
+        // ── 生成最终文字版 ──────────────────────────────
+        var transcript = fullTranscript
+
+        if settings.transcriptionEngine != .apple {
+            let engineName = settings.transcriptionEngine == .whisper ? "Whisper" : "SenseVoice"
+            statusMessage = "正在本地重新转写（\(engineName)，长会议需要一点时间）…"
+            let locale = settings.recognitionLocale
+            let engine = settings.transcriptionEngine
+            let whisperPath = settings.whisperModelPath
+            let svModelPath = settings.senseVoiceModelPath
+            let svTokensPath = settings.senseVoiceTokensPath
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
+                do {
+                    let wav = session.url.appendingPathComponent("audio.wav")
+                    let (samples, sampleRate) = try WavFileReader.readSamples(url: wav)
+                    switch engine {
+                    case .whisper:
+                        return .success(try LocalTranscriber.transcribeWhisper(
+                            modelPath: whisperPath,
+                            language: LocalTranscriber.whisperLanguage(fromLocale: locale),
+                            samples: samples
+                        ))
+                    case .senseVoice:
+                        return .success(try LocalTranscriber.transcribeSenseVoice(
+                            modelPath: svModelPath,
+                            tokensPath: svTokensPath,
+                            language: LocalTranscriber.senseVoiceLanguage(fromLocale: locale),
+                            samples: samples,
+                            sampleRate: sampleRate
+                        ))
+                    case .apple:
+                        return .success("")
+                    }
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+
+            switch result {
+            case .success(let text) where !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+                transcript = text
+                finalizedText = text
+                partialText = ""
+            case .failure(let error):
+                statusMessage = "\(engineName) 转写失败，已回退实时识别结果：\(error.localizedDescription)"
+            default:
+                statusMessage = "\(engineName) 转写结果为空，已回退实时识别结果"
+            }
+        }
 
         do {
             try store.writeTranscript(transcript, session: session)

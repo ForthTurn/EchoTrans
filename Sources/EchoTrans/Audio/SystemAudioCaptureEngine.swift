@@ -37,7 +37,7 @@ final class SystemAudioCaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.excludesCurrentProcessAudio = true
-        config.sampleRate = 48_000
+        config.sampleRate = 16_000
         config.channelCount = 1
         config.queueDepth = 8
         // ScreenCaptureKit 要求视频参数，给一个极小的占位（2x2、10fps），几乎不消耗资源

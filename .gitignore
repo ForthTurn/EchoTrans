@@ -6,6 +6,9 @@
 build/
 .swiftpm/
 
+# 本地引擎依赖与编译产物（scripts/fetch-dependencies.sh 拉取）
+vendor/
+
 # Xcode
 *.xcodeproj
 xcuserdata/

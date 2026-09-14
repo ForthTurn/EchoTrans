@@ -12,7 +12,7 @@ struct EchoTransApp: App {
         .windowResizability(.contentMinSize)
 
         Settings {
-            SettingsView(settings: model.settings)
+            SettingsView(model: model)
         }
     }
 }

@@ -36,6 +36,23 @@ final class AppSettings: ObservableObject {
     @Published var apiModel: String = "gpt-4o-mini"
     @Published var outputDirectoryPath: String = SessionStore.defaultRootDirectory.path
 
+    /// 最终文字版采用的转写引擎（apple 实时；whisper/senseVoice 停止后本地重转写）
+    @Published var transcriptionEngine: TranscriptionEngine = .whisper
+    @Published var whisperModelPath: String = AppSettings.defaultWhisperModelPath
+    @Published var senseVoiceModelDir: String = AppSettings.defaultSenseVoiceModelDir
+    /// HuggingFace 镜像（国内网络）
+    @Published var useHFMirror: Bool = false
+
+    var senseVoiceModelPath: String {
+        URL(fileURLWithPath: senseVoiceModelDir, isDirectory: true)
+            .appendingPathComponent("model.int8.onnx").path
+    }
+
+    var senseVoiceTokensPath: String {
+        URL(fileURLWithPath: senseVoiceModelDir, isDirectory: true)
+            .appendingPathComponent("tokens.txt").path
+    }
+
     var outputDirectoryURL: URL {
         URL(fileURLWithPath: outputDirectoryPath, isDirectory: true)
     }
@@ -52,6 +69,20 @@ final class AppSettings: ObservableObject {
         .init(baseURL: apiBaseURL, apiKey: apiKey, model: apiModel)
     }
 
+    static var modelsDirectory: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return appSupport.appendingPathComponent("EchoTrans/models", isDirectory: true)
+    }
+
+    static var defaultWhisperModelPath: String {
+        modelsDirectory.appendingPathComponent("ggml-large-v3-turbo.bin").path
+    }
+
+    static var defaultSenseVoiceModelDir: String {
+        modelsDirectory.appendingPathComponent("sensevoice", isDirectory: true).path
+    }
+
     // MARK: - 持久化
 
     private struct Payload: Codable {
@@ -61,6 +92,10 @@ final class AppSettings: ObservableObject {
         var apiKey: String
         var apiModel: String
         var outputDirectoryPath: String
+        var transcriptionEngine: String
+        var whisperModelPath: String
+        var senseVoiceModelDir: String
+        var useHFMirror: Bool
     }
 
     private static var settingsURL: URL {
@@ -76,7 +111,11 @@ final class AppSettings: ObservableObject {
             apiBaseURL: apiBaseURL,
             apiKey: apiKey,
             apiModel: apiModel,
-            outputDirectoryPath: outputDirectoryPath
+            outputDirectoryPath: outputDirectoryPath,
+            transcriptionEngine: transcriptionEngine.rawValue,
+            whisperModelPath: whisperModelPath,
+            senseVoiceModelDir: senseVoiceModelDir,
+            useHFMirror: useHFMirror
         )
         let url = Self.settingsURL
         let directory = url.deletingLastPathComponent()
@@ -98,6 +137,10 @@ final class AppSettings: ObservableObject {
         settings.apiKey = payload.apiKey
         settings.apiModel = payload.apiModel
         settings.outputDirectoryPath = payload.outputDirectoryPath
+        settings.transcriptionEngine = TranscriptionEngine(rawValue: payload.transcriptionEngine) ?? .whisper
+        settings.whisperModelPath = payload.whisperModelPath
+        settings.senseVoiceModelDir = payload.senseVoiceModelDir
+        settings.useHFMirror = payload.useHFMirror
         return settings
     }
 }
