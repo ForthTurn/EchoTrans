@@ -1,13 +1,31 @@
 #!/usr/bin/env bash
 # 构建并打包 EchoTrans.app（含本地转写引擎 whisper.cpp + sherpa-onnx）
 #
-# 前置：./scripts/fetch-dependencies.sh（拉取 whisper.cpp 源码与 sherpa-onnx 预编译库）
-# 本脚本会自动用 cmake 编译 whisper.cpp 静态库。
+# 用法:
+#   ./scripts/make-app.sh [release|debug] [--no-models] [--download-models]
+#
+# 默认会把本机模型目录（~/Library/Application Support/EchoTrans/models）中
+# 已存在的模型打包进 App（Contents/Resources/models）；--no-models 跳过；
+# --download-models 在模型缺失时自动先执行 fetch-dependencies.sh --models。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CONFIG="${1:-release}"
-ROOT="$(pwd)"
+CONFIG="release"
+BUNDLE_MODELS=1
+DOWNLOAD_MODELS=0
+for arg in "$@"; do
+    case "$arg" in
+        release|debug) CONFIG="$arg" ;;
+        --no-models) BUNDLE_MODELS=0 ;;
+        --download-models) DOWNLOAD_MODELS=1 ;;
+        *) echo "未知参数: $arg"; exit 1 ;;
+    esac
+done
+
+MODELS_DIR="${HOME}/Library/Application Support/EchoTrans/models"
+WHISPER_MODEL="ggml-large-v3-turbo.bin"
+SV_MODEL="sensevoice/model.int8.onnx"
+SV_TOKENS="sensevoice/tokens.txt"
 
 if [ ! -d vendor/whisper.cpp ] || [ ! -d vendor/sherpa-onnx/lib ]; then
     echo "==> 缺少依赖，先执行 fetch-dependencies.sh"
@@ -49,16 +67,14 @@ LINK_FLAGS=(
     -framework Accelerate -framework Metal -framework Foundation
     -Xlinker -rpath -Xlinker "@executable_path/../Frameworks"
 )
+SWIFT_FLAGS=(-swift-version 5 -parse-as-library $SOURCES build/direct/bridge.o \
+    -import-objc-header Bridge/EchoTransBridge.h \
+    -I vendor/whisper.cpp/include -I vendor/whisper.cpp/ggml/include -I vendor/sherpa-onnx/include \
+    "${LINK_FLAGS[@]}" -o build/direct/EchoTrans)
 if [ "$CONFIG" = "debug" ]; then
-    swiftc -swift-version 5 -parse-as-library -g $SOURCES build/direct/bridge.o \
-        -import-objc-header Bridge/EchoTransBridge.h \
-        -I vendor/whisper.cpp/include -I vendor/whisper.cpp/ggml/include -I vendor/sherpa-onnx/include \
-        "${LINK_FLAGS[@]}" -o build/direct/EchoTrans
+    swiftc -g "${SWIFT_FLAGS[@]}"
 else
-    swiftc -swift-version 5 -parse-as-library -O $SOURCES build/direct/bridge.o \
-        -import-objc-header Bridge/EchoTransBridge.h \
-        -I vendor/whisper.cpp/include -I vendor/whisper.cpp/ggml/include -I vendor/sherpa-onnx/include \
-        "${LINK_FLAGS[@]}" -o build/direct/EchoTrans
+    swiftc -O "${SWIFT_FLAGS[@]}"
 fi
 
 # ── 4. 组装 .app ───────────────────────────────────────────────────
@@ -72,10 +88,42 @@ cp build/direct/EchoTrans "$APP/Contents/MacOS/EchoTrans"
 # sherpa-onnx / onnxruntime 动态库打进 Frameworks（install name 均为 @rpath）
 cp vendor/sherpa-onnx/lib/*.dylib "$APP/Contents/Frameworks/"
 
+# ── 5. 内置模型 ────────────────────────────────────────────────────
+if [ "$BUNDLE_MODELS" = 1 ]; then
+    if [ "$DOWNLOAD_MODELS" = 1 ]; then
+        MISSING=0
+        [ -f "$MODELS_DIR/$WHISPER_MODEL" ] || MISSING=1
+        [ -f "$MODELS_DIR/$SV_MODEL" ] || MISSING=1
+        if [ "$MISSING" = 1 ]; then
+            ./scripts/fetch-dependencies.sh --models
+        fi
+    fi
+    echo "==> 打包内置模型"
+    RES_MODELS="$APP/Contents/Resources/models"
+    mkdir -p "$RES_MODELS/sensevoice"
+    if [ -f "$MODELS_DIR/$WHISPER_MODEL" ]; then
+        cp "$MODELS_DIR/$WHISPER_MODEL" "$RES_MODELS/"
+        echo "    ✓ whisper large-v3-turbo"
+    else
+        echo "    ⚠️  缺少 whisper 模型（可用 --download-models 或 fetch-dependencies.sh --models 下载）"
+    fi
+    if [ -f "$MODELS_DIR/$SV_MODEL" ] && [ -f "$MODELS_DIR/$SV_TOKENS" ]; then
+        cp "$MODELS_DIR/$SV_MODEL" "$MODELS_DIR/$SV_TOKENS" "$RES_MODELS/sensevoice/"
+        echo "    ✓ sensevoice int8"
+    else
+        echo "    ⚠️  缺少 sensevoice 模型"
+    fi
+else
+    echo "==> 跳过内置模型（--no-models）"
+fi
+
+# ── 6. ad-hoc 签名 ────────────────────────────────────────────────
 echo "==> ad-hoc 签名"
 codesign --force -s - "$APP/Contents/Frameworks/"*.dylib
 codesign --force -s - "$APP"
 
 echo
-echo "完成 ✅  $APP"
+APP_SIZE=$(du -sh "$APP" | cut -f1)
+echo "完成 ✅  $APP ($APP_SIZE)"
 echo "运行: open \"$APP\""
+echo "生成安装包: ./scripts/make-dmg.sh"

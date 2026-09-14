@@ -53,6 +53,38 @@ final class AppSettings: ObservableObject {
             .appendingPathComponent("tokens.txt").path
     }
 
+    // MARK: - App 内置模型（make-app.sh 打包进 Contents/Resources/models 时存在）
+
+    static func bundledModelURL(_ relativePath: String) -> URL? {
+        guard let resourceURL = Bundle.main.resourceURL else { return nil }
+        let url = URL(fileURLWithPath: resourceURL.path, isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent(relativePath)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    var whisperBundled: Bool {
+        Self.bundledModelURL("ggml-large-v3-turbo.bin") != nil
+    }
+
+    var senseVoiceBundled: Bool {
+        Self.bundledModelURL("sensevoice/model.int8.onnx") != nil
+            && Self.bundledModelURL("sensevoice/tokens.txt") != nil
+    }
+
+    /// 实际生效的模型路径：优先 App 内置，否则用户目录
+    var effectiveWhisperModelPath: String {
+        Self.bundledModelURL("ggml-large-v3-turbo.bin")?.path ?? whisperModelPath
+    }
+
+    var effectiveSenseVoiceModelPath: String {
+        Self.bundledModelURL("sensevoice/model.int8.onnx")?.path ?? senseVoiceModelPath
+    }
+
+    var effectiveSenseVoiceTokensPath: String {
+        Self.bundledModelURL("sensevoice/tokens.txt")?.path ?? senseVoiceTokensPath
+    }
+
     var outputDirectoryURL: URL {
         URL(fileURLWithPath: outputDirectoryPath, isDirectory: true)
     }

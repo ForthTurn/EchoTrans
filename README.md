@@ -58,16 +58,26 @@ SessionStore                    TranslationService
 # 1. 拉取依赖（whisper.cpp 源码 + sherpa-onnx 预编译库）
 ./scripts/fetch-dependencies.sh
 
-# 2. 打包成独立 App（自动编译 whisper.cpp + 桥接层 + 主程序）
+# 2. 构建可运行的 App
 ./scripts/make-app.sh
 open build/EchoTrans.app
 
-# 可选：在 App 设置里下载模型；或用命令行：
-./scripts/fetch-dependencies.sh --models
+# 3. 生成 DMG 安装包（模型打包进 App，拷给谁都能直接用）
+./scripts/make-dmg.sh
+# 或控制是否内置模型：
+./scripts/make-app.sh release --no-models        # 轻量包（引擎内置、模型外置，~34MB）
+./scripts/make-app.sh release --download-models  # 模型缺失时自动先下载
 
 # 可选：引擎冒烟测试（不启动 GUI，验证 Whisper / SenseVoice 桥接）
 ./scripts/test-engines.sh
 ```
+
+### 内置模型说明
+
+- **引擎**：whisper.cpp 与 sherpa-onnx 均直接编进/打入 App 二进制，无需额外安装
+- **模型**：默认打包到 `EchoTrans.app/Contents/Resources/models/`，App 运行时优先使用内置模型；
+  用户目录 `~/Library/Application Support/EchoTrans/models` 下的模型仍可在设置里追加（内置优先）
+- 生成安装包前请先确保模型已下载：`./scripts/fetch-dependencies.sh --models`
 
 > 注：部分版本的 CommandLineTools 存在 SwiftPM ManifestAPI 损坏的已知问题，
 > `swift build` 会报 "Undefined symbols ... Package.__allocating_init"；
@@ -76,7 +86,7 @@ open build/EchoTrans.app
 首次使用：按 `⌘,` 打开设置：
 
 1. **转写引擎**：默认 Whisper；会议记录推荐 Whisper（最稳）或 SenseVoice（中文最快）
-2. **下载对应模型**（设置里有进度条）
+2. **下载对应模型**（内置包无需此步；设置里有进度条）
 3. **识别语言**（默认 zh-CN）
 4. **API Base URL / API Key / 模型**（任意 OpenAI 兼容服务；不配置则只转写不翻译）
 5. **输出目录**（默认 `~/Documents/EchoTrans`）

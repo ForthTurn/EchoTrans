@@ -138,9 +138,9 @@ final class AppModel: ObservableObject {
             statusMessage = "正在本地重新转写（\(engineName)，长会议需要一点时间）…"
             let locale = settings.recognitionLocale
             let engine = settings.transcriptionEngine
-            let whisperPath = settings.whisperModelPath
-            let svModelPath = settings.senseVoiceModelPath
-            let svTokensPath = settings.senseVoiceTokensPath
+            let whisperPath = settings.effectiveWhisperModelPath
+            let svModelPath = settings.effectiveSenseVoiceModelPath
+            let svTokensPath = settings.effectiveSenseVoiceTokensPath
             let result = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
                 do {
                     let wav = session.url.appendingPathComponent("audio.wav")

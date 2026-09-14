@@ -40,13 +40,16 @@ final class ModelManager: NSObject, ObservableObject {
 
     // MARK: - 安装状态
 
+    var whisperBundled: Bool { settings.whisperBundled }
+    var senseVoiceBundled: Bool { settings.senseVoiceBundled }
+
     var whisperInstalled: Bool {
-        FileManager.default.fileExists(atPath: settings.whisperModelPath)
+        FileManager.default.fileExists(atPath: settings.effectiveWhisperModelPath)
     }
 
     var senseVoiceInstalled: Bool {
-        FileManager.default.fileExists(atPath: settings.senseVoiceModelPath)
-            && FileManager.default.fileExists(atPath: settings.senseVoiceTokensPath)
+        FileManager.default.fileExists(atPath: settings.effectiveSenseVoiceModelPath)
+            && FileManager.default.fileExists(atPath: settings.effectiveSenseVoiceTokensPath)
     }
 
     // MARK: - 下载入口
@@ -149,6 +152,7 @@ final class ModelManager: NSObject, ObservableObject {
     }
 
     func whisperStatusText() -> String {
+        if whisperBundled { return "App 内置 ✓" }
         if whisperInstalled { return "已安装 ✓" }
         switch whisperState {
         case .idle: return "未安装"
@@ -160,6 +164,7 @@ final class ModelManager: NSObject, ObservableObject {
     }
 
     func senseVoiceStatusText() -> String {
+        if senseVoiceBundled { return "App 内置 ✓" }
         if senseVoiceInstalled { return "已安装 ✓" }
         switch senseVoiceState {
         case .idle: return "未安装"
