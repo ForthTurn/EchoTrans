@@ -36,7 +36,8 @@ static int whisper_run(struct whisper_context *ctx,
     wparams.no_context       = true;
     wparams.suppress_nst     = true;
     wparams.temperature      = 0.0f;
-    wparams.temperature_inc  = 0.0f;  // 单遍解码，长音频提速明显
+    // 保留默认 temperature_inc=0.2 的熵回退：长音频多窗口解码遇到困难窗口时
+    // 需要升温重试，否则该窗口会静默降级（丢句/早停）。只有命中央败窗口才付重试成本。
     wparams.greedy.best_of   = 1;
     wparams.language         = (language && strcmp(language, "auto") != 0) ? language : NULL;
     wparams.n_threads        = 4;

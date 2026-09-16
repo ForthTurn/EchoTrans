@@ -112,6 +112,7 @@ final class LocalLiveTranscriber {
     private let sampleRate = 16000
     private let maxChunkSamples = 16000 * 25   // 满块提交
     private let minTickSamples = 16000 * 2     // 不足 2s 不值得跑一次
+    private let minFinalSamples = 16000        // 停止时尾块 ≥1s 也提交，避免丢结尾
     private let tickInterval: TimeInterval = 4
 
     init?(engine: TranscriptionEngine, settings: AppSettings) {
@@ -215,7 +216,7 @@ final class LocalLiveTranscriber {
             guard let self else { return }
             self.timer?.cancel()
             self.timer = nil
-            if self.chunk.count >= self.minTickSamples,
+            if self.chunk.count >= self.minFinalSamples,
                let text = try? self.transcribeCurrentChunk(),
                !text.isEmpty {
                 let base = self.committed.joined(separator: "\n")
@@ -297,7 +298,10 @@ enum LocalTranscriber {
         return String(cString: out)
     }
 
-    /// SenseVoice 转写（16kHz 单声道 PCM；桥接层内部按 30s 分块）
+    /// SenseVoice 转写（16kHz 单声道 PCM）。
+    ///
+    /// SenseVoice 离线模型单次最多约 30s：按 28s 步进、30s 窗口切块（2s 重叠），
+    /// 相邻块文本用接续去重拼接，避免硬切边界丢字；模型只加载一次。
     static func transcribeSenseVoice(
         modelPath: String,
         tokensPath: String,
@@ -311,22 +315,50 @@ enum LocalTranscriber {
         guard FileManager.default.fileExists(atPath: tokensPath) else {
             throw LocalTranscriptionError.modelNotFound(tokensPath)
         }
-        var out: UnsafeMutablePointer<CChar>?
-        let rc = samples.withUnsafeBufferPointer { buffer -> Int32 in
-            et_sensevoice_transcribe(
-                modelPath,
-                tokensPath,
-                language,
-                buffer.baseAddress,
-                Int32(clamping: samples.count),
-                sampleRate,
-                &out
-            )
+
+        let rate = Int(max(sampleRate, 1))
+        let window = rate * 30            // 单块上限（模型约束）
+        let step = rate * 28              // 步进（留 2s 重叠，覆盖边界处的半个词）
+        let minTail = rate / 2            // 末尾不足 0.5s 的碎片不单独成块
+
+        guard let handle = et_sensevoice_open(modelPath, tokensPath, language) else {
+            throw LocalTranscriptionError.bridgeFailed(-1)
         }
-        guard rc == 0, let out else {
-            throw LocalTranscriptionError.bridgeFailed(rc)
+        defer { et_sensevoice_close(handle) }
+
+        func transcribeRange(_ range: Range<Int>) throws -> String {
+            var out: UnsafeMutablePointer<CChar>?
+            let rc = samples.withUnsafeBufferPointer { buffer -> Int32 in
+                let base = buffer.baseAddress! + range.lowerBound
+                return et_sensevoice_transcribe_ctx(
+                    handle, base, Int32(range.count), sampleRate, &out
+                )
+            }
+            guard rc == 0, let out else {
+                throw LocalTranscriptionError.bridgeFailed(rc)
+            }
+            defer { et_free_string(out) }
+            return String(cString: out).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        defer { et_free_string(out) }
-        return String(cString: out)
+
+        var pieces: [String] = []
+        var start = 0
+        while start < samples.count {
+            let end = min(start + window, samples.count)
+            let text = try transcribeRange(start..<end)
+            if !text.isEmpty {
+                let committed = pieces.joined(separator: "\n")
+                let continuation = TranscriptTextStitcher.continuation(after: committed, newText: text)
+                pieces.append(continuation)
+            }
+            if end >= samples.count { break }
+            let nextStart = start + step
+            if samples.count - nextStart < minTail { break }  // 末尾碎片不足 0.5s，不单独成块
+            start = nextStart
+        }
+
+        return TranscriptTextStitcher.collapseAdjacentDuplicateLines(
+            pieces.joined(separator: "\n")
+        )
     }
 }

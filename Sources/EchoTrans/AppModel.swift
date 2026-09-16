@@ -106,6 +106,10 @@ final class AppModel: ObservableObject {
             // 采集音频同步落盘为 audio.wav，供本地引擎在结束时重新转写
             audioWriter = WavFileWriter(url: newSession.url.appendingPathComponent("audio.wav"))
 
+            // 断流重连、睡眠恢复等采集事件的提示（不影响 phase，采集继续）
+            engine.onStall = { [weak self] message in
+                self?.statusMessage = message
+            }
             let buffers = try await engine.start()
 
             // 实时预览只使用本地模型；模型不可用时明确失败，避免静默回退到低质量 Apple Speech。
@@ -210,6 +214,7 @@ final class AppModel: ObservableObject {
             }
         }
 
+        engine.onStall = nil
         await engine.stop()
 
         audioWriter?.finalize()
