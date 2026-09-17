@@ -13,27 +13,29 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            // ── 转写引擎 ──────────────────────────────────────────────
+            // ── 转写流程 ──────────────────────────────────────────────
             Section {
-                Picker("引擎", selection: engineBinding) {
-                    ForEach(TranscriptionEngine.selectableCases) { engine in
-                        Text(engine.shortName).tag(engine)
+                LabeledContent("实时转写") {
+                    Picker("", selection: $settings.realtimeTranscriptionEngine) {
+                        ForEach(RealtimeTranscriptionEngine.allCases) { engine in
+                            Text(engine.displayName).tag(engine)
+                        }
                     }
+                    .labelsHidden()
+                    .onChange(of: settings.realtimeTranscriptionEngine) { _, _ in settings.save() }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(settings.transcriptionEngine.featureDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                LabeledContent("最终转写") {
+                    Picker("", selection: $settings.finalTranscriptionEngine) {
+                        ForEach(FinalTranscriptionEngine.allCases) { engine in
+                            Text(engine.displayName).tag(engine)
+                        }
+                    }
+                    .labelsHidden()
+                    .onChange(of: settings.finalTranscriptionEngine) { _, _ in settings.save() }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
 
-                if settings.transcriptionEngine == .senseVoice,
+                if (settings.realtimeTranscriptionEngine == .senseVoice
+                    || settings.finalTranscriptionEngine == .senseVoice),
                    Locale(identifier: settings.recognitionLocale).language.languageCode?.identifier == "ja" {
                     Label("当前为日语：SenseVoice 可能出现中文音近字，准确率优先建议手动选择 Whisper。", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -53,7 +55,35 @@ struct SettingsView: View {
                 }
                 .help("选择具体语言可提高准确率；自动检测时由本地模型自行判断")
             } header: {
-                sectionHeader("转写引擎", systemImage: "waveform")
+                sectionHeader("转写流程", systemImage: "waveform")
+            } footer: {
+                Text("推荐：Nova-3 负责低延迟实时字幕，本地 Whisper 在停止后重新转写生成高质量终稿。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            // ── Cloudflare Nova-3 ────────────────────────────────────
+            if settings.realtimeTranscriptionEngine == .cloudflareNova3 {
+                Section {
+                    LabeledContent("Account ID") {
+                        TextField("Cloudflare Account ID", text: $settings.cloudflareAccountID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    LabeledContent("Gateway ID") {
+                        TextField("AI Gateway 名称", text: $settings.cloudflareGatewayID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    LabeledContent("API Token") {
+                        SecureField("Cloudflare API Token", text: $settings.cloudflareAPIToken)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                } header: {
+                    sectionHeader("Cloudflare Nova-3", systemImage: "cloud")
+                } footer: {
+                    Text("凭证仅保存在本机 EchoTrans/settings.json。请使用权限受限的 Cloudflare Token；音频将发送到 Cloudflare Workers AI 实时转写。")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             // ── 本地模型 ──────────────────────────────────────────────
@@ -87,7 +117,7 @@ struct SettingsView: View {
             } header: {
                 sectionHeader("本地模型", systemImage: "internaldrive")
             } footer: {
-                Text("模型保存在 ~/Library/Application Support/EchoTrans/models；安装包内置模型时无需下载")
+                Text("模型保存在 ~/Library/Application Support/EchoTrans/models；安装包不内置模型，请首次使用前下载所需引擎")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -109,7 +139,7 @@ struct SettingsView: View {
             } header: {
                 sectionHeader("翻译大模型（OpenAI 兼容）", systemImage: "globe")
             } footer: {
-                Text("兼容 OpenAI / new-api / one-api 等任何 /chat/completions 服务。实时译文列使用第一个目标语言。")
+                Text("兼容 OpenAI / new-api / one-api 等任何 /chat/completions 服务。实时与最终译文使用同一个目标语言。")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -135,13 +165,6 @@ struct SettingsView: View {
     }
 
     // MARK: - 辅助视图
-
-    private var engineBinding: Binding<TranscriptionEngine> {
-        Binding(
-            get: { settings.transcriptionEngine },
-            set: { settings.transcriptionEngine = $0; settings.save() }
-        )
-    }
 
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)

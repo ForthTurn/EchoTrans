@@ -1,5 +1,33 @@
 import Foundation
 
+enum RealtimeTranscriptionEngine: String, Codable, CaseIterable, Identifiable {
+    case cloudflareNova3
+    case whisper
+    case senseVoice
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .cloudflareNova3: return "Cloudflare Nova-3"
+        case .whisper: return "本地 Whisper"
+        case .senseVoice: return "本地 SenseVoice"
+        }
+    }
+}
+
+enum FinalTranscriptionEngine: String, Codable, CaseIterable, Identifiable {
+    case whisper
+    case senseVoice
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .whisper: return "本地 Whisper"
+        case .senseVoice: return "本地 SenseVoice"
+        }
+    }
+}
+
 /// 应用设置，持久化到 ~/Library/Application Support/EchoTrans/settings.json
 final class AppSettings: ObservableObject {
 
@@ -30,14 +58,19 @@ final class AppSettings: ObservableObject {
     ]
 
     @Published var recognitionLocale: String = "zh-CN"
-    @Published var targetLanguages: [String] = ["English", "日本語"]
+    @Published var targetLanguage: String = "English"
     @Published var apiBaseURL: String = ""
     @Published var apiKey: String = ""
     @Published var apiModel: String = ""
     @Published var outputDirectoryPath: String = SessionStore.defaultRootDirectory.path
 
-    /// 实时预览和最终文字版采用的本地转写引擎。
+    /// 旧版统一引擎字段，仅用于设置迁移。
     @Published var transcriptionEngine: TranscriptionEngine = .whisper
+    @Published var realtimeTranscriptionEngine: RealtimeTranscriptionEngine = .cloudflareNova3
+    @Published var finalTranscriptionEngine: FinalTranscriptionEngine = .whisper
+    @Published var cloudflareAccountID: String = ""
+    @Published var cloudflareGatewayID: String = ""
+    @Published var cloudflareAPIToken: String = ""
     @Published var whisperModelPath: String = AppSettings.defaultWhisperModelPath
     @Published var senseVoiceModelDir: String = AppSettings.defaultSenseVoiceModelDir
     /// HuggingFace 镜像（国内网络）
@@ -94,11 +127,17 @@ final class AppSettings: ObservableObject {
         !apiKey.trimmingCharacters(in: .whitespaces).isEmpty
             && !apiBaseURL.trimmingCharacters(in: .whitespaces).isEmpty
             && !apiModel.trimmingCharacters(in: .whitespaces).isEmpty
-            && !targetLanguages.isEmpty
+            && !targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var translationConfig: TranslationService.Config {
         .init(baseURL: apiBaseURL, apiKey: apiKey, model: apiModel)
+    }
+
+    var cloudflareNovaConfigured: Bool {
+        !cloudflareAccountID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !cloudflareGatewayID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !cloudflareAPIToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     static var modelsDirectory: URL {
@@ -119,7 +158,9 @@ final class AppSettings: ObservableObject {
 
     private struct Payload: Codable {
         var recognitionLocale: String
-        var targetLanguages: [String]
+        /// targetLanguages 用于读取旧版多选配置；新版本只写 targetLanguage。
+        var targetLanguages: [String]?
+        var targetLanguage: String?
         var apiBaseURL: String
         var apiKey: String
         var apiModel: String
@@ -128,6 +169,11 @@ final class AppSettings: ObservableObject {
         var whisperModelPath: String
         var senseVoiceModelDir: String
         var useHFMirror: Bool
+        var realtimeTranscriptionEngine: String?
+        var finalTranscriptionEngine: String?
+        var cloudflareAccountID: String?
+        var cloudflareGatewayID: String?
+        var cloudflareAPIToken: String?
     }
 
     private static var settingsURL: URL {
@@ -139,7 +185,8 @@ final class AppSettings: ObservableObject {
     func save() {
         let payload = Payload(
             recognitionLocale: recognitionLocale,
-            targetLanguages: targetLanguages,
+            targetLanguages: nil,
+            targetLanguage: targetLanguage,
             apiBaseURL: apiBaseURL,
             apiKey: apiKey,
             apiModel: apiModel,
@@ -147,7 +194,12 @@ final class AppSettings: ObservableObject {
             transcriptionEngine: transcriptionEngine.rawValue,
             whisperModelPath: whisperModelPath,
             senseVoiceModelDir: senseVoiceModelDir,
-            useHFMirror: useHFMirror
+            useHFMirror: useHFMirror,
+            realtimeTranscriptionEngine: realtimeTranscriptionEngine.rawValue,
+            finalTranscriptionEngine: finalTranscriptionEngine.rawValue,
+            cloudflareAccountID: cloudflareAccountID,
+            cloudflareGatewayID: cloudflareGatewayID,
+            cloudflareAPIToken: cloudflareAPIToken
         )
         let url = Self.settingsURL
         let directory = url.deletingLastPathComponent()
@@ -164,7 +216,9 @@ final class AppSettings: ObservableObject {
             return settings
         }
         settings.recognitionLocale = payload.recognitionLocale
-        settings.targetLanguages = payload.targetLanguages
+        let migratedTarget = payload.targetLanguage ?? payload.targetLanguages?.first ?? "English"
+        settings.targetLanguage = AppSettings.availableTargetLanguages.contains(migratedTarget)
+            ? migratedTarget : "English"
         // 兼容旧版本：如果用户从未修改过旧默认值，迁移为空白 placeholder
         settings.apiBaseURL = payload.apiBaseURL == "https://api.openai.com/v1" ? "" : payload.apiBaseURL
         settings.apiKey = payload.apiKey
@@ -176,6 +230,21 @@ final class AppSettings: ObservableObject {
         settings.whisperModelPath = payload.whisperModelPath
         settings.senseVoiceModelDir = payload.senseVoiceModelDir
         settings.useHFMirror = payload.useHFMirror
+        if let raw = payload.realtimeTranscriptionEngine,
+           let engine = RealtimeTranscriptionEngine(rawValue: raw) {
+            settings.realtimeTranscriptionEngine = engine
+        } else {
+            settings.realtimeTranscriptionEngine = storedEngine == .senseVoice ? .senseVoice : .whisper
+        }
+        if let raw = payload.finalTranscriptionEngine,
+           let engine = FinalTranscriptionEngine(rawValue: raw) {
+            settings.finalTranscriptionEngine = engine
+        } else {
+            settings.finalTranscriptionEngine = storedEngine == .senseVoice ? .senseVoice : .whisper
+        }
+        settings.cloudflareAccountID = payload.cloudflareAccountID ?? ""
+        settings.cloudflareGatewayID = payload.cloudflareGatewayID ?? ""
+        settings.cloudflareAPIToken = payload.cloudflareAPIToken ?? ""
         return settings
     }
 }

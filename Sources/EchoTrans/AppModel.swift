@@ -58,6 +58,7 @@ final class AppModel: ObservableObject {
     private var session: SessionStore.Session?
     private var audioWriter: WavFileWriter?
     private var liveLocal: LocalLiveTranscriber?
+    private var liveNova: CloudflareNovaTranscriber?
 
     init(settings: AppSettings = AppSettings.load()) {
         self.settings = settings
@@ -69,6 +70,27 @@ final class AppModel: ObservableObject {
 
     func start() {
         guard phase == .idle else { return }
+        let realtimeReady: Bool
+        switch settings.realtimeTranscriptionEngine {
+        case .cloudflareNova3:
+            realtimeReady = settings.cloudflareNovaConfigured
+        case .whisper:
+            realtimeReady = modelManager.whisperInstalled
+        case .senseVoice:
+            realtimeReady = modelManager.senseVoiceInstalled
+        }
+        guard realtimeReady else {
+            statusMessage = settings.realtimeTranscriptionEngine == .cloudflareNova3
+                ? "请先在设置中配置 Cloudflare Nova-3"
+                : "请先在设置中下载实时转写模型"
+            return
+        }
+        let finalReady = settings.finalTranscriptionEngine == .whisper
+            ? modelManager.whisperInstalled : modelManager.senseVoiceInstalled
+        guard finalReady else {
+            statusMessage = "请先在设置中下载最终转写模型"
+            return
+        }
         phase = .capturing
         Task { await startSession() }
     }
@@ -112,33 +134,54 @@ final class AppModel: ObservableObject {
             }
             let buffers = try await engine.start()
 
-            // 实时预览只使用本地模型；模型不可用时明确失败，避免静默回退到低质量 Apple Speech。
-            guard settings.transcriptionEngine != .apple,
-                  let local = LocalLiveTranscriber(engine: settings.transcriptionEngine, settings: settings) else {
-                throw AppError(
-                    message: "本地 \(settings.transcriptionEngine.shortName) 模型不可用，请在设置中确认模型已安装"
-                )
-            }
-            liveLocal = local
-            local.onUpdate = { [weak self] committed, partial in
-                guard let self else { return }
-                let changed = self.finalizedText != committed || self.partialText != partial
-                self.finalizedText = committed
-                self.partialText = partial
-                if changed {
-                    self.lastTranscriptUpdateAt = Date()
+            switch settings.realtimeTranscriptionEngine {
+            case .cloudflareNova3:
+                let nova = CloudflareNovaTranscriber(configuration: .init(
+                    accountID: settings.cloudflareAccountID,
+                    gatewayID: settings.cloudflareGatewayID,
+                    apiToken: settings.cloudflareAPIToken,
+                    language: settings.recognitionLocale
+                ))
+                nova.onUpdate = { [weak self] committed, partial, isFinal in
+                    guard let self else { return }
+                    let changed = self.finalizedText != committed || self.partialText != partial
+                    self.finalizedText = committed
+                    self.partialText = partial
+                    if changed { self.lastTranscriptUpdateAt = Date() }
+                    // Nova 的 interim 也需要驱动防抖计时；否则一段话迟迟没有
+                    // is_final 时，右侧实时译文会一直为空。
+                    if changed { self.scheduleLiveTranslation() }
+                    // is_final 的 committed 文本在 tryLiveTranslation 中会被直接视为稳定文本。
+                    if isFinal { self.tryLiveTranslation() }
                 }
-                self.scheduleLiveTranslation()
+                nova.onError = { [weak self] message in self?.statusMessage = message }
+                try nova.start()
+                liveNova = nova
+            case .whisper, .senseVoice:
+                let engine: TranscriptionEngine = settings.realtimeTranscriptionEngine == .whisper ? .whisper : .senseVoice
+                guard let local = LocalLiveTranscriber(engine: engine, settings: settings) else {
+                    throw AppError(message: "本地实时模型不可用，请在设置中确认模型已安装")
+                }
+                liveLocal = local
+                local.onUpdate = { [weak self] committed, partial in
+                    guard let self else { return }
+                    let changed = self.finalizedText != committed || self.partialText != partial
+                    self.finalizedText = committed
+                    self.partialText = partial
+                    if changed { self.lastTranscriptUpdateAt = Date() }
+                    self.scheduleLiveTranslation()
+                }
+                local.onError = { [weak self] message in
+                    self?.statusMessage = "本地实时引擎出错：\(message)"
+                }
+                local.start()
             }
-            local.onError = { [weak self] message in
-                self?.statusMessage = "本地实时引擎出错：\(message)"
-            }
-            local.start()
-            statusMessage = "正在采集…（实时引擎：\(settings.transcriptionEngine.shortName) · 本地）"
+            statusMessage = "正在采集…（实时引擎：\(settings.realtimeTranscriptionEngine.displayName)）"
 
-            // detached：音频落盘与喂帧不占用主线程；writer/本地引擎提前捕获引用
+            // detached：音频落盘与喂帧不占用主线程；writer/实时引擎提前捕获引用
             let writer = audioWriter
             let liveLocalEngine = liveLocal
+            let liveNovaEngine = liveNova
             var totalFrames: Double = 0
             var windowSquared: Double = 0
             var windowCount: Int = 0
@@ -147,6 +190,7 @@ final class AppModel: ObservableObject {
                 for await buffer in buffers {
                     writer?.append(buffer: buffer)
                     liveLocalEngine?.append(buffer: buffer)
+                    liveNovaEngine?.append(buffer: buffer)
 
                     // 采集统计（每 0.5s 发布一次，顺便做实时电平表）
                     let frames = Double(buffer.frameLength)
@@ -183,6 +227,17 @@ final class AppModel: ObservableObject {
 
             statusMessage = "正在采集系统音频并转写…（识别语言：\(settings.recognitionLocale)）"
         } catch {
+            if let nova = liveNova { _ = await nova.stop() }
+            liveNova = nil
+            liveLocal = nil
+            await engine.stop()
+            consumeTask?.cancel()
+            consumeTask = nil
+            audioWriter?.finalize()
+            audioWriter = nil
+            if let failedSession = session {
+                try? FileManager.default.removeItem(at: failedSession.url)
+            }
             phase = .idle
             session = nil
             statusMessage = "启动失败：\(error.localizedDescription)"
@@ -198,7 +253,13 @@ final class AppModel: ObservableObject {
         liveTranslationTask?.cancel()
         liveTranslationTask = nil
 
-        consumeTask?.cancel()
+        // 先让 ScreenCaptureKit 停止产出并结束 AsyncStream，再等待消费端排空。
+        // 这保证停止瞬间的最后几帧既写入 WAV，也送达所选实时引擎。
+        engine.onStall = nil
+        await engine.stop()
+        if let task = consumeTask {
+            await task.value
+        }
         consumeTask = nil
 
         // 停止本地实时引擎（提交剩余块 + 释放模型）
@@ -213,11 +274,17 @@ final class AppModel: ObservableObject {
                 partialText = ""
             }
         }
-
-        engine.onStall = nil
-        await engine.stop()
+        if let nova = liveNova {
+            let novaText = await nova.stop()
+            liveNova = nil
+            if !novaText.isEmpty {
+                finalizedText = novaText
+                partialText = ""
+            }
+        }
 
         audioWriter?.finalize()
+        audioWriter = nil
 
         guard let session else {
             phase = .idle
@@ -233,51 +300,47 @@ final class AppModel: ObservableObject {
         // ── 生成最终文字版 ──────────────────────────────
         var transcript = fullTranscript
 
-        if settings.transcriptionEngine != .apple {
-            let engineName = settings.transcriptionEngine == .whisper ? "Whisper" : "SenseVoice"
-            statusMessage = "正在本地重新转写（\(engineName)，长会议需要一点时间）…"
-            let locale = settings.recognitionLocale
-            let engine = settings.transcriptionEngine
-            let whisperPath = settings.effectiveWhisperModelPath
-            let svModelPath = settings.effectiveSenseVoiceModelPath
-            let svTokensPath = settings.effectiveSenseVoiceTokensPath
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
-                do {
-                    let wav = session.url.appendingPathComponent("audio.wav")
-                    let (samples, sampleRate) = try WavFileReader.readSamples(url: wav)
-                    switch engine {
-                    case .whisper:
-                        return .success(try LocalTranscriber.transcribeWhisper(
-                            modelPath: whisperPath,
-                            language: LocalTranscriber.whisperLanguage(fromLocale: locale),
-                            samples: samples
-                        ))
-                    case .senseVoice:
-                        return .success(try LocalTranscriber.transcribeSenseVoice(
-                            modelPath: svModelPath,
-                            tokensPath: svTokensPath,
-                            language: LocalTranscriber.senseVoiceLanguage(fromLocale: locale),
-                            samples: samples,
-                            sampleRate: sampleRate
-                        ))
-                    case .apple:
-                        return .success("")
-                    }
-                } catch {
-                    return .failure(error)
+        let engineName = settings.finalTranscriptionEngine.displayName
+        statusMessage = "正在本地重新转写（\(engineName)，长会议需要一点时间）…"
+        let locale = settings.recognitionLocale
+        let finalEngine = settings.finalTranscriptionEngine
+        let whisperPath = settings.effectiveWhisperModelPath
+        let svModelPath = settings.effectiveSenseVoiceModelPath
+        let svTokensPath = settings.effectiveSenseVoiceTokensPath
+        let result = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
+            do {
+                let wav = session.url.appendingPathComponent("audio.wav")
+                let (samples, sampleRate) = try WavFileReader.readSamples(url: wav)
+                switch finalEngine {
+                case .whisper:
+                    return .success(try LocalTranscriber.transcribeWhisper(
+                        modelPath: whisperPath,
+                        language: LocalTranscriber.whisperLanguage(fromLocale: locale),
+                        samples: samples
+                    ))
+                case .senseVoice:
+                    return .success(try LocalTranscriber.transcribeSenseVoice(
+                        modelPath: svModelPath,
+                        tokensPath: svTokensPath,
+                        language: LocalTranscriber.senseVoiceLanguage(fromLocale: locale),
+                        samples: samples,
+                        sampleRate: sampleRate
+                    ))
                 }
-            }.value
-
-            switch result {
-            case .success(let text) where !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
-                transcript = text
-                finalizedText = text
-                partialText = ""
-            case .failure(let error):
-                statusMessage = "\(engineName) 转写失败，已回退实时识别结果：\(error.localizedDescription)"
-            default:
-                statusMessage = "\(engineName) 转写结果为空，已回退实时识别结果"
+            } catch {
+                return .failure(error)
             }
+        }.value
+
+        switch result {
+        case .success(let text) where !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            transcript = text
+            finalizedText = text
+            partialText = ""
+        case .failure(let error):
+            statusMessage = "\(engineName) 转写失败，已回退实时识别结果：\(error.localizedDescription)"
+        default:
+            statusMessage = "\(engineName) 转写结果为空，已回退实时识别结果"
         }
 
         do {
@@ -288,26 +351,25 @@ final class AppModel: ObservableObject {
 
         if settings.needsTranslationAPI,
            !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            statusMessage = "正在调用大模型翻译…（\(settings.targetLanguages.joined(separator: "、"))）"
+            let language = settings.targetLanguage
+            statusMessage = "正在调用大模型翻译…（\(language)）"
             let service = TranslationService(config: settings.translationConfig)
-            for language in settings.targetLanguages {
-                do {
-                    let translated = try await service.translate(
-                        text: transcript,
-                        to: language,
-                        sourceLocale: settings.recognitionLocale
-                    )
-                    let fileURL = try? store.writeTranslation(
-                        translated, language: language, session: session
-                    )
-                    translationResults.append(
-                        TranslationResult(language: language, text: translated, fileURL: fileURL, error: nil)
-                    )
-                } catch {
-                    translationResults.append(
-                        TranslationResult(language: language, text: "", fileURL: nil, error: error.localizedDescription)
-                    )
-                }
+            do {
+                let translated = try await service.translate(
+                    text: transcript,
+                    to: language,
+                    sourceLocale: settings.recognitionLocale
+                )
+                let fileURL = try? store.writeTranslation(
+                    translated, language: language, session: session
+                )
+                translationResults.append(
+                    TranslationResult(language: language, text: translated, fileURL: fileURL, error: nil)
+                )
+            } catch {
+                translationResults.append(
+                    TranslationResult(language: language, text: "", fileURL: nil, error: error.localizedDescription)
+                )
             }
             statusMessage = "完成 ✓ 已保存到 \(session.url.path)"
         } else if settings.apiKey.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -323,7 +385,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - 实时对照翻译
 
-    /// 实时译文列使用第一个目标语言；只翻译已完结的句子（节流 + 增量，避免重复翻译与频繁请求）
+    /// 实时译文列使用所选目标语言；只翻译已完结的句子（节流 + 增量，避免重复翻译与频繁请求）
     private func scheduleLiveTranslation() {
         guard settings.needsTranslationAPI else { return }
         // 识别器会在很短时间内连续修正同一句话，先合并这些更新，
@@ -367,13 +429,27 @@ final class AppModel: ObservableObject {
         var source = stable
         var consumedCount = stable.count
 
+        // Nova 已确认的文本不依赖标点：is_final 本身就是稳定边界，可以立即翻译。
+        // partial 仍走下面的“停止更新一段时间”软边界，避免频繁翻译抖动文本。
+        if settings.realtimeTranscriptionEngine == .cloudflareNova3,
+           finalizedText.count > liveTranslatedOffset {
+            source = finalizedText
+            consumedCount = finalizedText.count
+        }
+
         // 口语识别经常很久没有标点。尾巴达到一定长度且停止更新一段时间后，
         // 把它当作软边界翻译，否则右列会长时间空白。
-        if source.count <= liveTranslatedOffset,
-           pending.count >= liveSoftBoundaryLength,
-           now.timeIntervalSince(lastTranscriptUpdateAt) >= liveSoftBoundaryDelay {
-            source = full
-            consumedCount = full.count
+        if source.count <= liveTranslatedOffset, pending.count >= liveSoftBoundaryLength {
+            let stableFor = now.timeIntervalSince(lastTranscriptUpdateAt)
+            if stableFor >= liveSoftBoundaryDelay {
+                source = full
+                consumedCount = full.count
+            } else {
+                // debounce 通常早于软边界到期。必须安排剩余时间后的重试，
+                // 否则 Nova 停止更新后不会再有事件来触发实时翻译。
+                scheduleLiveTranslationRetry(after: liveSoftBoundaryDelay - stableFor)
+                return
+            }
         }
 
         // 本地 ASR 会反复修正当前块。已经显示的译文保持不动，并把增量游标
@@ -390,7 +466,7 @@ final class AppModel: ObservableObject {
 
         let config = settings.translationConfig
         let locale = settings.recognitionLocale
-        let language = settings.targetLanguages.first ?? "English"
+        let language = settings.targetLanguage
         lastLiveTranslateAt = now
 
         liveTranslationTask = Task { [weak self] in
@@ -417,6 +493,19 @@ final class AppModel: ObservableObject {
                     self.liveTranslationTask = nil
                     self.statusMessage = "实时翻译失败：\(error.localizedDescription)"
                 }
+            }
+        }
+    }
+
+    private func scheduleLiveTranslationRetry(after delay: TimeInterval) {
+        liveTranslationDebounceTask?.cancel()
+        liveTranslationDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0.05, delay) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.liveTranslationDebounceTask = nil
+                self.tryLiveTranslation()
             }
         }
     }

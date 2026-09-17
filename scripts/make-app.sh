@@ -2,22 +2,19 @@
 # 构建并打包 EchoTrans.app（含本地转写引擎 whisper.cpp + sherpa-onnx）
 #
 # 用法:
-#   ./scripts/make-app.sh [release|debug] [--no-models] [--download-models]
+#   ./scripts/make-app.sh [release|debug] [--with-models]
 #
-# 默认会把本机模型目录（~/Library/Application Support/EchoTrans/models）中
-# 已存在的模型打包进 App（Contents/Resources/models）；--no-models 跳过；
-# --download-models 在模型缺失时自动先执行 fetch-dependencies.sh --models。
+# 默认不把本机模型打包进 App，用户首次运行后可在设置中自行下载。
+# --with-models 仅用于内部测试或离线分发，发布包不应使用该选项。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="release"
-BUNDLE_MODELS=1
-DOWNLOAD_MODELS=0
+BUNDLE_MODELS=0
 for arg in "$@"; do
     case "$arg" in
         release|debug) CONFIG="$arg" ;;
-        --no-models) BUNDLE_MODELS=0 ;;
-        --download-models) DOWNLOAD_MODELS=1 ;;
+        --with-models) BUNDLE_MODELS=1 ;;
         *) echo "未知参数: $arg"; exit 1 ;;
     esac
 done
@@ -88,16 +85,8 @@ cp build/direct/EchoTrans "$APP/Contents/MacOS/EchoTrans"
 # sherpa-onnx / onnxruntime 动态库打进 Frameworks（install name 均为 @rpath）
 cp vendor/sherpa-onnx/lib/*.dylib "$APP/Contents/Frameworks/"
 
-# ── 5. 内置模型 ────────────────────────────────────────────────────
+# ── 5. 可选内置模型（默认关闭）──────────────────────────────────────
 if [ "$BUNDLE_MODELS" = 1 ]; then
-    if [ "$DOWNLOAD_MODELS" = 1 ]; then
-        MISSING=0
-        [ -f "$MODELS_DIR/$WHISPER_MODEL" ] || MISSING=1
-        [ -f "$MODELS_DIR/$SV_MODEL" ] || MISSING=1
-        if [ "$MISSING" = 1 ]; then
-            ./scripts/fetch-dependencies.sh --models
-        fi
-    fi
     echo "==> 打包内置模型"
     RES_MODELS="$APP/Contents/Resources/models"
     mkdir -p "$RES_MODELS/sensevoice"
@@ -105,7 +94,7 @@ if [ "$BUNDLE_MODELS" = 1 ]; then
         cp "$MODELS_DIR/$WHISPER_MODEL" "$RES_MODELS/"
         echo "    ✓ whisper large-v3-turbo"
     else
-        echo "    ⚠️  缺少 whisper 模型（可用 --download-models 或 fetch-dependencies.sh --models 下载）"
+        echo "    ⚠️  缺少 whisper 模型（可先执行 fetch-dependencies.sh --models）"
     fi
     if [ -f "$MODELS_DIR/$SV_MODEL" ] && [ -f "$MODELS_DIR/$SV_TOKENS" ]; then
         cp "$MODELS_DIR/$SV_MODEL" "$MODELS_DIR/$SV_TOKENS" "$RES_MODELS/sensevoice/"
@@ -114,7 +103,7 @@ if [ "$BUNDLE_MODELS" = 1 ]; then
         echo "    ⚠️  缺少 sensevoice 模型"
     fi
 else
-    echo "==> 跳过内置模型（--no-models）"
+    echo "==> 不打包本地模型（用户可在 App 设置中下载）"
 fi
 
 # ── 6. 签名 ─────────────────────────────────────────────────────────

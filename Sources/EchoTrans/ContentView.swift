@@ -4,10 +4,12 @@ import AppKit
 struct ContentView: View {
     @ObservedObject private var model: AppModel
     @ObservedObject private var settings: AppSettings
+    @ObservedObject private var models: ModelManager
 
     init(model: AppModel) {
         self.model = model
         self._settings = ObservedObject(wrappedValue: model.settings)
+        self._models = ObservedObject(wrappedValue: model.modelManager)
     }
 
     var body: some View {
@@ -16,6 +18,9 @@ struct ContentView: View {
             Divider()
             ScrollView {
                 VStack(spacing: 16) {
+                    if !transcriptionReady {
+                        transcriptionSetupCard
+                    }
                     controlsCard
                     transcriptCard
                     if !model.translationResults.isEmpty {
@@ -47,6 +52,11 @@ struct ContentView: View {
                     .truncationMode(.middle)
             }
             Spacer()
+            settingsLink {
+                Label("设置", systemImage: "gearshape")
+            }
+            .controlSize(.small)
+            .help("打开设置（⌘,）")
             phaseBadge
         }
         .padding(.horizontal, 16)
@@ -72,6 +82,86 @@ struct ContentView: View {
 
     // MARK: - 控制区
 
+    private var realtimeReady: Bool {
+        switch settings.realtimeTranscriptionEngine {
+        case .cloudflareNova3:
+            return settings.cloudflareNovaConfigured
+        case .whisper:
+            return models.whisperInstalled
+        case .senseVoice:
+            return models.senseVoiceInstalled
+        }
+    }
+
+    private var finalReady: Bool {
+        settings.finalTranscriptionEngine == .whisper
+            ? models.whisperInstalled : models.senseVoiceInstalled
+    }
+
+    private var transcriptionReady: Bool { realtimeReady && finalReady }
+
+    private var setupMessage: String {
+        if !realtimeReady && settings.realtimeTranscriptionEngine == .cloudflareNova3 {
+            return "请配置 Cloudflare Account ID、AI Gateway ID 和 API Token。"
+        }
+        if !realtimeReady { return "请下载所选的本地实时转写模型。" }
+        return "请下载所选的本地最终转写模型。"
+    }
+
+    private var transcriptionSetupCard: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 28))
+                .foregroundStyle(.orange)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("需要完成转写设置")
+                    .font(.headline)
+                Text("\(setupMessage) 完成后即可开始采集和转写。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            settingsLink {
+                Text("前往设置")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.orange.opacity(0.1))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func settingsLink<Label: View>(@ViewBuilder label: () -> Label) -> some View {
+        if #available(macOS 14.0, *) {
+            SettingsLink {
+                label()
+            }
+        } else {
+            Button {
+                openLegacySettings()
+            } label: {
+                label()
+            }
+        }
+    }
+
+    private func openLegacySettings() {
+        let opened = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        if !opened {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
+    }
+
     private var controlsCard: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 14) {
@@ -84,20 +174,14 @@ struct ContentView: View {
                 .disabled(model.phase != .idle)
                 .onChange(of: settings.recognitionLocale) { _, _ in settings.save() }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("翻译目标语言：")
-                        .font(.callout)
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 100), spacing: 8)],
-                        alignment: .leading,
-                        spacing: 8
-                    ) {
-                        ForEach(AppSettings.availableTargetLanguages, id: \.self) { language in
-                            languageChip(language)
-                        }
+                Picker("翻译目标语言：", selection: $settings.targetLanguage) {
+                    ForEach(AppSettings.availableTargetLanguages, id: \.self) { language in
+                        Text(language).tag(language)
                     }
-                    .disabled(model.phase != .idle)
                 }
+                .frame(width: 280, alignment: .leading)
+                .disabled(model.phase != .idle)
+                .onChange(of: settings.targetLanguage) { _, _ in settings.save() }
 
                 HStack(spacing: 12) {
                     Button {
@@ -116,7 +200,7 @@ struct ContentView: View {
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                     .tint(model.phase == .capturing ? .red : .green)
-                    .disabled(model.phase == .finalizing)
+                    .disabled(model.phase == .finalizing || (model.phase == .idle && !transcriptionReady))
 
                     Spacer()
 
@@ -129,33 +213,6 @@ struct ContentView: View {
         } label: {
             Label("控制", systemImage: "slider.horizontal.3")
         }
-    }
-
-    private func languageChip(_ language: String) -> some View {
-        let isSelected = settings.targetLanguages.contains(language)
-        return Button {
-            if isSelected {
-                settings.targetLanguages.removeAll { $0 == language }
-            } else {
-                settings.targetLanguages.append(language)
-            }
-            settings.save()
-        } label: {
-            Text(language)
-                .font(.callout)
-                .padding(.vertical, 5)
-                .padding(.horizontal, 10)
-                .frame(maxWidth: .infinity)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(isSelected ? Color.accentColor.opacity(0.18) : Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: 1)
-                )
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - 实时转写（原文/译文双列）
@@ -180,7 +237,7 @@ struct ContentView: View {
             HStack {
                 Label("实时对照", systemImage: "character.bubble")
                 Spacer()
-                Text("停止采集后：本地引擎重转写 + 全部目标语言落盘")
+                Text("停止采集后：本地引擎重转写 + 所选目标语言落盘")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -188,12 +245,12 @@ struct ContentView: View {
     }
 
     private var liveTranslationLanguage: String {
-        settings.targetLanguages.first ?? "未选择"
+        settings.targetLanguage
     }
 
     private var liveTranslationPlaceholder: String {
         if !settings.needsTranslationAPI {
-            return "（在设置中配置 API Key 后，这里会实时显示第一个目标语言的译文…）"
+            return "（在设置中配置 API Key 后，这里会实时显示所选目标语言的译文…）"
         }
         return "（识别出的完整句子会实时翻译到这里…）"
     }
